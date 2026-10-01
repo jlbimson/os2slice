@@ -28,13 +28,14 @@ from os2slice.filaments import (
     sliced_nozzle,
     slots_from_status,
 )
-from os2slice.modules.bambu_project import BED_MM, Project, layout
+from os2slice.modules.bambu_project import BED_MM, Project, layout, with_tower_retries
 from os2slice.modules.base import (
     MEDIA_GCODE_3MF,
     Field,
     Health,
     Material,
     ModelDefaults,
+    ModuleAuthError,
     ModuleError,
     ModuleSpec,
     PrinterInfo,
@@ -50,7 +51,6 @@ from os2slice.modules.base import (
 
 log = logging.getLogger(__name__)
 
-TOWER_ERRORS = ("conflict", "unprintable area", "wipe tower", "prime tower")
 READY_STATES = ("IDLE", "FINISH", "FAILED")
 PRESET_CACHE_S = 600.0
 
@@ -203,6 +203,7 @@ class BambuddyModule:
                     auto_orient=job.auto_orient,
                     filament_colours=colours or None,
                     bed_type=job.bed_type,
+                    extra_overrides=dict(job.process_overrides) or None,
                 )
                 sliced = bb.wait_for_slice(slice_job, on_status=lambda s: progress(f"Slicing: {s}"))
             else:
@@ -248,9 +249,8 @@ class BambuddyModule:
         progress: Progress,
     ) -> SliceResult:
         """Slice the uploaded 3MF, moving the prime tower on tower errors (D-20)."""
-        towers = project.tower_spots(job.printer)
-        for attempt, tower in enumerate(towers, start=1):
-            progress("Slicing" if attempt == 1 else f"Slicing again, prime tower moved ({attempt})")
+
+        def attempt(tower: dict[str, str]) -> SliceResult:
             slice_job = bb.start_slice(
                 file_id,
                 presets,
@@ -259,17 +259,13 @@ class BambuddyModule:
                 filament_colours=colours or None,
                 bed_type=job.bed_type,
                 filament_presets=list(project.filament_profiles),
-                extra_overrides=tower,
+                extra_overrides={**job.process_overrides, **tower},
                 auto_arrange=job.auto_arrange,
             )
-            try:
-                return bb.wait_for_slice(slice_job, on_status=lambda s: progress(f"Slicing: {s}"))
-            except BambuddyError as e:
-                tower_problem = any(w in e.message.lower() for w in TOWER_ERRORS)
-                if not tower_problem or attempt == len(towers):
-                    raise
-                log.info("tower at %s rejected: %s", tower, e.message)
-        raise BambuddyError("Slicing didn't run")  # pragma: no cover - towers is never empty
+            return bb.wait_for_slice(slice_job, on_status=lambda s: progress(f"Slicing: {s}"))
+
+        progress("Slicing")
+        return with_tower_retries(project.tower_spots(job.printer), attempt, progress)
 
     # -- target ----------------------------------------------------------------
 
@@ -306,10 +302,16 @@ class BambuddyModule:
     def status(self, printer: PrinterInfo) -> PrinterStatus:
         dual = printer.nozzle_count > 1
         suffix = preset_suffix(printer.profiles.filament)
-        with self.client() as bb:
-            raw = bb.printer_status(int(printer.extra["printer_id"]))
-            slots = slots_from_status(raw, dual)
-            names = self._filament_names(bb) if slots and suffix else []
+        try:
+            with self.client() as bb:
+                raw = bb.printer_status(int(printer.extra["printer_id"]))
+                slots = slots_from_status(raw, dual)
+                names = self._filament_names(bb) if slots and suffix else []
+        except ModuleAuthError:
+            raise
+        except ModuleError as e:  # BamBuddy down or refusing: the printer is offline to us
+            log.warning("bambuddy %s: no status for %s: %s", self.url, printer.name, e.message)
+            return PrinterStatus("offline", False, False, e.message)
         materials = tuple(
             Material(
                 id=str(s.tray_id),

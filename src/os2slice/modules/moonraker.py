@@ -24,6 +24,7 @@ from os2slice.modules.base import (
     Field,
     Health,
     Material,
+    ModuleAuthError,
     ModuleError,
     ModuleSpec,
     PrinterInfo,
@@ -81,6 +82,10 @@ class MoonrakerError(ModuleError):
         self.status = status
 
 
+class MoonrakerAuthError(MoonrakerError, ModuleAuthError):
+    """Moonraker refused the request (401/403): the API key or trusted_clients."""
+
+
 def check_url(url: str, what: str) -> str:
     """A configured http(s) base URL with no credentials, path or query, without the slash."""
     parts = urlsplit(url.strip())
@@ -126,9 +131,11 @@ class Moonraker:
         self,
         values: Mapping[str, Any],
         *,
+        key: str = "moonraker",
         transport: httpx.BaseTransport | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
+        self.key = key
         self.url = check_url(str(values.get("url") or ""), "Moonraker url")
         ui = str(values.get("ui_url") or "")
         self.ui_url = check_url(ui, "Moonraker ui_url") if ui else ""
@@ -169,7 +176,7 @@ class Moonraker:
             return Health(False, e.one_line())
         klipper = str(info.get("software_version") or "")
         summary = f"Moonraker {version}, Klipper {klipper}: {state}"
-        return Health(True, summary, version, str(info.get("state_message") or ""))
+        return Health(True, summary, version)
 
     def printers(self, configured: tuple[PrinterInfo, ...]) -> tuple[PrinterInfo, ...]:
         hostname = ""
@@ -328,9 +335,10 @@ class Moonraker:
             return r
         reason = self._reason(r)
         if r.status_code in (401, 403):
-            raise MoonrakerError(
+            raise MoonrakerAuthError(
                 f"Moonraker refused the request ({r.status_code}{reason})",
-                "Set the target's API key, or add this server to Moonraker's trusted_clients",
+                f"Check the API key for [targets.{self.key}] (secret targets.{self.key}.api_key), "
+                "or add this server to Moonraker's trusted_clients",
                 r.status_code,
             )
         raise MoonrakerError(

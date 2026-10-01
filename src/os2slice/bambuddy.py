@@ -12,7 +12,7 @@ import httpx
 
 from os2slice import __version__
 from os2slice.errors import AuthError
-from os2slice.modules.base import ModuleError
+from os2slice.modules.base import ModuleAuthError, ModuleError
 from os2slice.settings import PrintSettings
 
 log = logging.getLogger(__name__)
@@ -23,6 +23,10 @@ DONE_STATE = "completed"
 
 class BambuddyError(ModuleError):
     """BamBuddy refused or failed (exit code 6, HTTP 502)."""
+
+
+class BambuddyAuthError(ModuleAuthError, AuthError):
+    """BamBuddy refused the API key (401/403). Still an AuthError for older callers."""
 
 
 @dataclass(frozen=True)
@@ -263,7 +267,7 @@ class BambuddyClient:
             ) from e
         log.debug("%s %s -> %s", method, r.request.url.copy_with(query=None), r.status_code)
         if r.status_code in (401, 403):
-            raise AuthError(
+            raise BambuddyAuthError(
                 f"BamBuddy refused the API key ({r.status_code})",
                 "Check the key and its permissions (read status, library, queue)",
             )

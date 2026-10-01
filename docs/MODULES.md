@@ -18,15 +18,20 @@ The contract is `src/os2slice/modules/base.py`. Read it before touching a module
 
 | kind | role | technology | makes / accepts | status |
 |---|---|---|---|---|
-| `bambuddy` | slicer + target | fdm | makes `gcode.3mf`; accepts `gcode.3mf` | today's path, wrapped |
-| `bambu-studio-api` | slicer | fdm | `gcode.3mf`, `gcode` | sidecar on the NUC, port 3001 |
-| `orca-slicer-api` | slicer | fdm | `gcode.3mf`, `gcode` | same REST shape as above |
+| `bambuddy` | slicer + target | fdm | makes `gcode.3mf`; accepts `gcode.3mf` | built; today's path, verified live on barnassistant |
+| `bambu-studio-api` | slicer | fdm | `gcode.3mf`, `gcode` | built (`modules/slicerapi.py`); verified live in local Docker, not yet on the NUC's add-on (port 3001); `docs/SLICERAPI_API.md` |
+| `orca-slicer-api` | slicer | fdm | `gcode.3mf`, `gcode` | built, same module; verified live in local Docker (port 3003) |
 | `prusaslicer-cli` | slicer | fdm | `gcode`, `bgcode` | subprocess, later |
-| `moonraker` | target | fdm | `gcode` | Klipper |
-| `prusalink` | target | fdm | `gcode`, `bgcode` | Prusa MK4 / XL / Core One / MINI |
+| `moonraker` | target | fdm | `gcode` | built (`modules/moonraker.py`); read from docs, no live printer yet; `docs/PRINTER_APIS.md` |
+| `prusalink` | target | fdm | `gcode`, `bgcode` | built (`modules/prusalink.py`); read from docs, no live printer yet |
 | `octoprint` | target | fdm | `gcode` | later |
 | `preform-server` | slicer + target (pair only with itself) | sla | `form` | Formlabs Form 4, issue #2 |
 | `desktop` | hand-off | any | n/a | the local mode (`[slicers.*]` with `argv`), unchanged |
+
+Pairings that load: either sidecar → `bambuddy` (`gcode.3mf`, BamBuddy uploads it to its
+library and queues it), → `moonraker` (`gcode`), → `prusalink` (`gcode`). `bambuddy` as a
+slicer pairs only with itself (it makes `gcode.3mf` only), so `bambuddy` → `moonraker`
+is refused at load.
 
 A slicer and a target pair when the slicer makes a medium the target accepts and the
 technologies match; `pairs_only_with` restricts further (PreForm). Config validation
@@ -42,7 +47,7 @@ and a slicer of the same key: a printer or a model default may name `<key>` as i
 
 ## Config
 
-As implemented in 9a (`config.py`; module kinds other than `bambuddy` arrive in 9b/9c):
+As implemented in 9a–9c (`config.py`; every kind above marked built is registered):
 
 ```toml
 default_printer = "X1C_01"       # a printer key or name (was [bambuddy] default_printer)
@@ -137,7 +142,11 @@ unchanged.
    / Orca project builds it with `modules/bambu_project.py` (`build_project(job)`,
    `layout(job)` for the footprint and filament profiles, `tower_spots`, `copy_offsets`;
    bed from `PrinterInfo.bed_mm`, else a table by model); one that wants STL per part
-   gets `parts` as is.
+   gets `parts` as is. With more than one filament a Bambu-style slicer asks for a prime
+   tower beside the footprint: `bambu_project.with_tower_retries(project.tower_spots(
+   printer), attempt, progress)` calls `attempt(tower)` with each spot (process keys
+   `wipe_tower_x`/`wipe_tower_y`, on top of `SliceInput.process_overrides`) until one
+   isn't refused as a tower problem (D-20, D-30).
 5. "Open in Bambu Studio" (D-21) slices with the printer's slicer when it makes
    `gcode.3mf` and copies that file's `Metadata/project_settings.config` onto the
    project built from the same `SliceInput`.
@@ -150,11 +159,25 @@ that belong to no single printer (the panel, job pages). BamBuddy derives
 
 - One file per module in `src/os2slice/modules/`, registered in `registry.py`
   (`SLICERS` and/or `TARGETS` by `spec.kind`). The class is built as
-  `Cls(values, *, key, transport=None)`: `values` are the validated fields with secrets
-  resolved (plus `models` for targets), `key` its config name.
+  `Cls.from_values(values, *, key, transport=None)` when it has that classmethod, else
+  `Cls(values, *, key, transport=None)`; `key` is passed only when the signature takes
+  it. `values` are the validated fields with secrets resolved (plus `models` for
+  targets), `key` its config name (use it in error fixes: "[targets.<key>]").
 - `spec` with every config field, so the config page and `doctor` need no module code.
 - Only the configured URL is called; nothing from a request. Timeouts on every call.
-- `ModuleError` with the service's own reason text; never swallow it.
+- `ModuleError` with the service's own reason text; never swallow it. A 401/403 from
+  the service is `ModuleAuthError` (still HTTP 502; CLI exit code 3) whose fix names
+  the secret to check (`targets.<key>.api_key`).
+- `check()` never raises: it returns `Health(ok=False, summary=<why>)`. `Health.detail`
+  is a warning line (doctor prints it as WARN), so leave it empty when all is well.
+- Target `status()` follows the offline convention: an unreachable printer or service
+  is `PrinterStatus("offline", connected=False, ready=False, detail=<why>)`, not an
+  exception; only config and auth problems raise.
+- Slicers apply `settings.process_overrides()`, then `SliceInput.process_overrides`
+  (extra keys from the core), then their own tower spot; `SliceInput.extra` is for
+  module-specific facts only.
+- Optional `close()` when the module holds pooled connections; `Modules.close()` (or
+  `with Modules.from_config(...) as modules:`) calls it.
 - A fake transport in `tests/fakes_<module>.py` built from recorded shapes, and a
   `docs/<MODULE>_API.md` with what was verified live (✅) versus read from docs.
 - Live tests behind `OS2SLICE_LIVE_<MODULE>_URL`; printing behind an explicit flag only.

@@ -9,6 +9,7 @@ through `spec_for`; nothing else needs to know the kind.
 from __future__ import annotations
 
 import inspect
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -25,17 +26,24 @@ from os2slice.modules.base import (
     Slicer,
     Target,
 )
+from os2slice.modules.moonraker import Moonraker
+from os2slice.modules.prusalink import PrusaLink
+from os2slice.modules.slicerapi import BambuStudioApi, OrcaSlicerApi
 
 if TYPE_CHECKING:
     from os2slice.config import Config, PrinterConfig
 
+log = logging.getLogger(__name__)
+
 SLICERS: dict[str, type[Any]] = {
     "bambuddy": BambuddyModule,
-    # "bambu-studio-api": ..., "orca-slicer-api": ...  (modules/slicerapi.py, 9b)
+    "bambu-studio-api": BambuStudioApi,
+    "orca-slicer-api": OrcaSlicerApi,
 }
 TARGETS: dict[str, type[Any]] = {
     "bambuddy": BambuddyModule,
-    # "moonraker": ..., "prusalink": ...  (modules/moonraker.py, modules/prusalink.py, 9c)
+    "moonraker": Moonraker,
+    "prusalink": PrusaLink,
 }
 
 # The local hand-off (`[slicers.<key>]` with `argv`, D-3): not a server-side module,
@@ -96,10 +104,12 @@ def resolve_secrets(
 def _construct(
     cls: type[Any], values: Mapping[str, Any], key: str, transport: httpx.BaseTransport | None
 ) -> Any:
-    """`cls(values, key=..., transport=...)`; `key` only for classes that take it."""
-    if "key" in inspect.signature(cls).parameters:
-        return cls(values, key=key, transport=transport)
-    return cls(values, transport=transport)
+    """`cls.from_values(...)` when the class has it, else `cls(...)`, with `values`,
+    `transport` and, only for factories that take it, `key`."""
+    make = getattr(cls, "from_values", cls)
+    if "key" in inspect.signature(make).parameters:
+        return make(values, key=key, transport=transport)
+    return make(values, transport=transport)
 
 
 def build_slicer(
@@ -191,6 +201,26 @@ class Modules:
                 s.kind, values, key=key, transport=per_key.get(key, transport)
             )
         return mods
+
+    def close(self) -> None:
+        """Close every module that has a `close()` (pooled connections); once each."""
+        seen: set[int] = set()
+        for module in [*self.targets.values(), *self.slicers.values()]:
+            if id(module) in seen:
+                continue
+            seen.add(id(module))
+            close = getattr(module, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # closing is best effort; never mask the real outcome
+                    log.warning("closing module %s failed", module.spec.kind, exc_info=True)
+
+    def __enter__(self) -> Modules:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
     def printers(self) -> list[PrinterInfo]:
         """Every target's printers, discovered and configured, in config order."""
