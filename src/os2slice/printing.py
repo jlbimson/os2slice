@@ -1,8 +1,9 @@
-"""The BamBuddy print path: plan (read-only) → confirm → export, orient, upload, slice, queue.
+"""The print path: plan (read-only) → confirm → export, orient, slice, submit.
 
-`plan_print` only reads, so it's safe to run for a confirmation page or a
-CLI prompt. `execute_print` does the work and is only called after an
-explicit human confirmation (D-13).
+`plan_print` only reads, so it's safe to run for a confirmation page or a CLI
+prompt. `execute_print` does the work and is only called after an explicit human
+confirmation (D-13). Slicing and submitting go through the printer's slicer and
+target modules (docs/MODULES.md, D-27); this file knows no service by name.
 """
 
 from __future__ import annotations
@@ -11,112 +12,57 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any
 
 from os2slice import files
-from os2slice.bambuddy import BambuddyClient, BambuddyError, PresetChoice, Printer, SliceResult
 from os2slice.config import Config
 from os2slice.errors import BadRequest, ConfigError
-from os2slice.filaments import (
-    NOZZLE_NAMES,
-    Slot,
-    match_preset,
-    preset_suffix,
-    sliced_nozzle,
-    slots_from_status,
+from os2slice.modules import bambu_project
+from os2slice.modules.base import (
+    MEDIA_GCODE_3MF,
+    Material,
+    Media,
+    ModuleError,
+    ModuleSpec,
+    PartGeometry,
+    PrinterInfo,
+    PrinterStatus,
+    Profiles,
+    SliceInput,
+    SliceOutput,
+    Submission,
+    distinct_materials,
 )
+from os2slice.modules.registry import Modules
 from os2slice.onshape import OnshapeClient
 from os2slice.orientation import (
     AXES,
     IDENTITY,
     Matrix,
     Orientation,
-    bounding_box,
     face_down,
     orient_parts,
     orient_stl,
-    translate_xy,
 )
 from os2slice.request import ExportRequest
 from os2slice.settings import PrintSettings, check_bed_type
-from os2slice.threemf import Part, build_3mf, project_settings_of, with_project_settings
+from os2slice.threemf import project_settings_of, with_project_settings
 
 log = logging.getLogger(__name__)
 
 Progress = Callable[[str], None]
 
-# Multi-filament prints are placed at the bed centre by os2slice (auto-arrange off), so the
-# prime tower can go beside the part. On dual-nozzle printers it must also be where both
-# nozzles reach (H2D: left x 0-325, right x 25-350; docs/BAMBUDDY_API.md).
-BED_MM = {"H2D": (350, 320), "H2D Pro": (350, 320), "H2S": (340, 320), "H2C": (350, 320),
-          "A1 Mini": (180, 180)}  # fmt: skip
-SHARED_X = {"H2D": (25, 325), "H2D Pro": (25, 325), "H2C": (25, 325)}
-TOWER_W, TOWER_D, GAP = 40.0, 60.0, 12.0  # generous tower footprint and clearance, mm
-TOWER_ERRORS = ("conflict", "unprintable area", "wipe tower", "prime tower")
-# Copies: gap between neighbours (more with a brim, Bambu's default brim is 5 mm wide)
-# and a margin kept clear around the bed's edge, mm.
-COPY_GAP, BRIM_GAP, BED_MARGIN = 6.0, 10.0, 5.0
-
-
-def copy_offsets(
-    size: tuple[float, float], copies: int, bed: tuple[float, float], gap: float = COPY_GAP
-) -> list[tuple[float, float]]:
-    """X/Y offsets that lay `copies` of a `size` (w, d) footprint out in a grid centred
-    on its current position, row by row from the front left; the squarest grid that fits.
-    """
-    w, d = size
-    room_w, room_d = bed[0] - 2 * BED_MARGIN, bed[1] - 2 * BED_MARGIN
-    best: tuple[float, int, int] | None = None
-    for cols in range(1, copies + 1):
-        rows = -(-copies // cols)
-        grid_w, grid_d = cols * w + (cols - 1) * gap, rows * d + (rows - 1) * gap
-        if grid_w <= room_w and grid_d <= room_d:
-            score = max(grid_w / room_w, grid_d / room_d)
-            if best is None or score < best[0]:
-                best = (score, cols, rows)
-    if best is None:
-        raise BadRequest(
-            f"{copies} copies don't fit on the plate",
-            f"Each copy is {w:.0f} x {d:.0f} mm; print fewer copies",
-        )
-    _, cols, rows = best
-    pitch_x, pitch_y = w + gap, d + gap
-    x0, y0 = -(cols - 1) * pitch_x / 2, -(rows - 1) * pitch_y / 2
-    return [(x0 + (n % cols) * pitch_x, y0 + (n // cols) * pitch_y) for n in range(copies)]
-
-
-def tower_spots(model: str, footprint: tuple[float, float, float, float]) -> list[dict[str, str]]:
-    """Prime tower positions beside a part footprint (x0, y0, x1, y1), best first."""
-    w, d = BED_MM.get(model, (256, 256))
-    lo_x, hi_x = SHARED_X.get(model, (0, w))
-    x0, y0, x1, y1 = footprint
-    cy = min(max((y0 + y1) / 2 - TOWER_D / 2, 5), d - TOWER_D - 5)
-    cx = (x0 + x1) / 2 - TOWER_W / 2
-    spots = [
-        (x1 + GAP, max(y1 - TOWER_D, 5)),  # right, towards the back (like Bambu Studio)
-        (x0 - GAP - TOWER_W, max(y1 - TOWER_D, 5)),  # left
-        (x1 + GAP, cy),  # right, middle
-        (cx, y1 + GAP),  # behind
-        (cx, y0 - GAP - TOWER_D),  # in front
-    ]
-    ok = [
-        (x, y) for x, y in spots
-        if lo_x <= x and x + TOWER_W <= hi_x and y >= 0 and y + TOWER_D <= d
-    ]  # fmt: skip
-    return [{"wipe_tower_x": f"{x:.1f}", "wipe_tower_y": f"{y:.1f}"} for x, y in ok]
-
 
 @dataclass(frozen=True)
 class PartChoice:
-    """One part of the print and the filament it prints with."""
+    """One part of the print and the material it prints with."""
 
     part_id: str
     name: str
-    slot: Slot | None
-    filament_preset: str
+    material: Material | None
+    filament_profile: str
 
     def describe(self) -> str:
-        return f"{self.name}: {self.slot.describe() if self.slot else self.filament_preset}"
+        return f"{self.name}: {self.material.label if self.material else self.filament_profile}"
 
 
 @dataclass(frozen=True)
@@ -124,19 +70,22 @@ class PrintPlan:
     req: ExportRequest
     document_name: str
     part_name: str
-    printer: Printer
-    printer_state: str
-    presets: PresetChoice
+    printer: PrinterInfo
+    status: PrinterStatus
+    profiles: Profiles  # resolved: the filament follows the chosen material
     orientation: Orientation
     settings: PrintSettings
-    manual_start: bool
-    slot: Slot | None = None  # loaded filament to print from; None = preset filament
-    bed_type: str | None = None  # build plate; None = the process preset's default
+    manual_start: bool  # the target leaves the print waiting for a person (D-13)
+    target_label: str = ""  # "BamBuddy"
+    material: Material | None = None  # loaded material to print from; None = profile filament
+    bed_type: str | None = None  # build plate; None = the process profile's default
     extra: tuple[PartChoice, ...] = ()  # further parts of a multi-material print
 
     @property
     def parts(self) -> tuple[PartChoice, ...]:
-        first = PartChoice(self.req.part_id or "", self.part_name, self.slot, self.presets.filament)
+        first = PartChoice(
+            self.req.part_id or "", self.part_name, self.material, self.profiles.filament
+        )
         return (first, *self.extra)
 
     @property
@@ -151,18 +100,23 @@ class PrintPlan:
             what = [
                 f"Part:        {self.part_name}  ({self.document_name})",
                 "Filament:    "
-                + (self.slot.describe() if self.slot else "as the preset (BamBuddy maps it)"),
+                + (
+                    self.material.label
+                    if self.material
+                    else f"as the preset ({self.target_label} maps it)"
+                ),
             ]
         lines = [
             *what,
-            f"Printer:     {self.printer.name} ({self.printer.model}), now {self.printer_state}",
-            f"Presets:     {self.presets.process} / {self.presets.filament}",
+            f"Printer:     {self.printer.name} ({self.printer.model}), "
+            f"now {self.status.describe()}",
+            f"Presets:     {self.profiles.process} / {self.profiles.filament}",
             f"Plate:       {self.bed_type or 'process preset default'}",
             f"Orientation: {self.orientation.describe()}",
             f"Settings:    {self.settings.describe()}",
             "Start:       "
             + (
-                "waits in BamBuddy's queue until you press Start"
+                f"waits in {self.target_label}'s queue until you press Start"
                 if self.manual_start
                 else "starts as soon as the printer is free"
             ),
@@ -174,13 +128,13 @@ class PrintPlan:
 
 @dataclass(frozen=True)
 class PrintOutcome:
-    slice: SliceResult
-    queue_item: dict[str, Any] | None  # None when only sliced
-    threemf: bytes | None = None  # the uploaded 3MF (3MF path only)
+    input: SliceInput  # what was sliced (the oriented parts, profiles, materials)
+    slice: SliceOutput
+    submission: Submission | None  # None when only sliced
 
     @property
     def queued(self) -> bool:
-        return self.queue_item is not None
+        return self.submission is not None
 
 
 def rotation_for(
@@ -189,7 +143,7 @@ def rotation_for(
     req: ExportRequest,
     part_ids: list[str] | None = None,
 ) -> Matrix:
-    """The rotation to apply before upload. `auto` leaves the part as modeled for the slicer.
+    """The rotation to apply before slicing. `auto` leaves the part as modeled.
 
     With several parts (`part_ids`), the face may belong to any of them.
     """
@@ -220,105 +174,159 @@ def oriented_parts(
     return orient_parts(stls, rotation)
 
 
-def resolve_printer(printers: list[Printer], wanted: str | None) -> Printer:
-    active = [p for p in printers if p.is_active]
-    listing = ", ".join(f"{p.name} (#{p.id})" for p in active) or "none"
-    if not wanted:
-        raise BadRequest("No printer chosen", f"Pick one of: {listing}")
-    for p in active:
-        if wanted == p.name or wanted == str(p.id):
-            return p
-    raise BadRequest(f"No active printer called {wanted!r}", f"Printers: {listing}")
+def has_profiles(printer: PrinterInfo) -> bool:
+    """Whether a printer can be sliced for: it has a slicer and profiles to slice with."""
+    p = printer.profiles
+    return bool(printer.slicer and (p.printer or p.process or p.filament))
+
+
+def materials_of(printer: PrinterInfo, status: PrinterStatus) -> tuple[Material, ...]:
+    """What the printer has loaded, or its configured materials when the target can't tell."""
+    return status.materials or printer.materials
+
+
+def usable(material: Material, printer: PrinterInfo) -> bool:
+    """A material can be printed from once it has a profile and, with two nozzles, a nozzle."""
+    return bool(material.profile) and (printer.nozzle_count <= 1 or material.extruder is not None)
+
+
+def media_for(slicer: ModuleSpec, target: ModuleSpec) -> Media:
+    """The first medium the target accepts that the slicer makes."""
+    for m in target.accepts:
+        if m in slicer.makes:
+            return m
+    raise ConfigError(f"{slicer.label} can't make anything {target.label} takes")
 
 
 def plan_print(
     req: ExportRequest,
     cfg: Config,
     onshape: OnshapeClient,
-    bambuddy: BambuddyClient,
+    modules: Modules,
     printer: str | None,
     orientation: Orientation,
     settings: PrintSettings,
-    slot: int | None = None,
+    material: str | None = None,
     bed_type: str | None = None,
-    extra_parts: list[tuple[str, int]] | None = None,
+    extra_parts: list[tuple[str, str]] | None = None,
 ) -> PrintPlan:
-    """Gather everything for the confirmation. Reads from Onshape and BamBuddy only.
+    """Gather everything for the confirmation. Reads from Onshape and the target only.
 
-    `slot` is a global tray id (docs/BAMBUDDY_API.md); the filament preset then
-    follows the loaded material instead of the configured one. `extra_parts` makes
-    it a multi-material print: more (part id, slot) pairs printed as one object.
+    `printer` is a PrinterInfo key or name (default: `default_printer`). `material`
+    is a Material.id from the printer's status (a global tray id on BamBuddy); the
+    filament profile then follows the loaded material instead of the configured one.
+    `extra_parts` makes it a multi-material print: more (part id, material id) pairs
+    printed as one object.
     """
-    if cfg.bambuddy is None:
-        raise ConfigError("BamBuddy isn't configured", f"Add a [bambuddy] table to {cfg.path}")
+    if not modules.targets:
+        raise ConfigError("No printers are configured", f"Add a [targets.<name>] table to {cfg.path}")
     if req.part_id is None:
         raise BadRequest("Whole Part Studio printing isn't implemented yet", "Pick one part")
-    chosen = resolve_printer(bambuddy.list_printers(), printer or cfg.bambuddy.default_printer)
-    presets = cfg.bambuddy.presets.get(chosen.model)
-    if presets is None:
+    chosen = modules.find(printer)
+    if not has_profiles(chosen):
         raise ConfigError(
             f"No slicer presets configured for printer model {chosen.model!r}",
-            f'Add [bambuddy.presets."{chosen.model}"] to {cfg.path}',
+            f'Add [targets.{chosen.target}.models."{chosen.model}"] to {cfg.path}',
         )
-    status = bambuddy.printer_status(chosen.id)
+    target = modules.target_for(chosen)
+    status = target.status(chosen)
+    loaded = {m.id: m for m in materials_of(chosen, status)}
     dual = chosen.nozzle_count > 1
-    slots = {s.tray_id: s for s in slots_from_status(status, dual)}
-    names: list[str] = []
-    suffix = preset_suffix(presets.filament)
 
-    def resolve(tray: int) -> tuple[Slot, str]:
-        loaded = slots.get(tray)
-        if loaded is None:
-            raise BadRequest(f"Nothing is loaded in slot {tray} on {chosen.name}")
-        if dual and loaded.extruder not in NOZZLE_NAMES:
+    def resolve(mid: str) -> Material:
+        m = loaded.get(mid)
+        if m is None:
+            raise BadRequest(f"Nothing is loaded in slot {mid} on {chosen.name}")
+        if dual and m.extruder is None:
             raise BadRequest(
-                f"Can't tell which nozzle {loaded.label} on {chosen.name} feeds",
+                f"Can't tell which nozzle {m.label} on {chosen.name} feeds",
                 "Check the AMS assignment on the printer, or use the preset filament",
             )
-        if not names:
-            names.extend(bambuddy.filament_preset_names())
-        preset = match_preset(loaded, suffix, names)
-        if preset is None:
-            raise BadRequest(f"No slicer preset for {loaded.material} on {chosen.name}")
-        return loaded, preset
+        if not m.profile:
+            raise BadRequest(f"No slicer preset for {m.kind} on {chosen.name}")
+        return m
 
-    loaded: Slot | None = None
-    if slot is not None:
-        loaded, preset = resolve(slot)
-        presets = replace(presets, filament=preset)
+    profiles = chosen.profiles
+    first: Material | None = None
+    if material is not None:
+        first = resolve(material)
+        profiles = replace(profiles, filament=first.profile)
     extra: list[PartChoice] = []
     if extra_parts:
-        if loaded is None:
+        if first is None:
             raise BadRequest(
                 "Pick a loaded filament for every part of a multi-material print",
                 "Choose a slot, not the preset filament",
             )
         part_names = {str(p.get("partId")): str(p.get("name")) for p in onshape.list_parts(req)}
         seen = {req.part_id}
-        for part_id, tray in extra_parts:
+        for part_id, mid in extra_parts:
             if part_id in seen:
                 raise BadRequest(f"Part {part_id!r} is listed twice")
             if part_id not in part_names:
                 raise BadRequest(f"Part {part_id!r} isn't in this Part Studio")
             seen.add(part_id)
-            s, p = resolve(tray)
-            extra.append(PartChoice(part_id, part_names[part_id], s, p))
-    state = str(status.get("state") or ("offline" if not status.get("connected") else "unknown"))
-    if status.get("awaiting_plate_clear"):
-        state += ", waiting for the plate to be cleared"
+            m = resolve(mid)
+            extra.append(PartChoice(part_id, part_names[part_id], m, m.profile))
+    configured_plate = chosen.extra.get("bed_type")
     return PrintPlan(
         req=req,
         document_name=onshape.get_document_name(req.document_id),
         part_name=onshape.get_part_name(req),
         printer=chosen,
-        printer_state=state,
-        presets=presets,
+        status=status,
+        profiles=profiles,
         orientation=orientation,
         settings=settings,
-        manual_start=cfg.bambuddy.manual_start,
-        slot=loaded,
-        bed_type=check_bed_type(bed_type) or presets.bed_type or cfg.default_bed_type,
+        manual_start=not modules.starts(chosen),
+        target_label=target.spec.label,
+        material=first,
+        bed_type=check_bed_type(bed_type)
+        or (configured_plate if isinstance(configured_plate, str) else None)
+        or cfg.default_bed_type,
         extra=tuple(extra),
+    )
+
+
+def slice_input(
+    plan: PrintPlan,
+    cfg: Config,
+    onshape: OnshapeClient,
+    media: Media | None = None,
+    *,
+    progress: Progress = lambda s: None,
+    now: datetime | None = None,
+    project: bool = False,
+) -> SliceInput:
+    """Export and orient the plan's parts (one shared rotation and drop) for a slicer."""
+    req = plan.req
+    progress("Working out the orientation")
+    rotation = rotation_for(plan.orientation, onshape, req, [p.part_id for p in plan.parts])
+    n = len(plan.parts)
+    progress("Exporting the part from Onshape" if n == 1 else f"Exporting {n} parts from Onshape")
+    stls = [
+        onshape.export_stl(replace(req, part_id=p.part_id), units="millimeter") for p in plan.parts
+    ]
+    placed = orient_parts(stls, rotation)
+    stem = files.export_path(
+        cfg.export_dir, plan.document_name, plan.part_name, req.configuration, "x", now
+    ).name.removesuffix(".x")
+    auto = plan.orientation.kind == "auto"
+    return SliceInput(
+        job_name=stem,
+        printer=plan.printer,
+        parts=tuple(
+            PartGeometry(p.name, stl, p.material)
+            for p, stl in zip(plan.parts, placed, strict=True)
+        ),
+        settings=plan.settings,
+        profiles=plan.profiles,
+        copies=plan.settings.copies,
+        auto_orient=auto,
+        auto_arrange=auto,
+        bed_type=plan.bed_type,
+        media=media,
+        extra={"document": plan.document_name, "project": project},
     )
 
 
@@ -326,191 +334,56 @@ def execute_print(
     plan: PrintPlan,
     cfg: Config,
     onshape: OnshapeClient,
-    bambuddy: BambuddyClient,
+    modules: Modules,
     *,
     queue: bool,
     progress: Progress = lambda s: None,
     now: datetime | None = None,
     force_3mf: bool = False,
 ) -> PrintOutcome:
-    """Export → orient → upload → slice → (queue). Call only after explicit confirmation."""
-    if cfg.bambuddy is None:
-        raise ConfigError("BamBuddy isn't configured", f"Add a [bambuddy] table to {cfg.path}")
-    req = plan.req
+    """Export → orient → slice → (submit). Call only after explicit confirmation.
 
-    progress("Working out the orientation")
-    rotation = rotation_for(plan.orientation, onshape, req, [p.part_id for p in plan.parts])
-    root = bambuddy.ensure_folder(cfg.bambuddy.folder)
-    folder = bambuddy.ensure_folder(files.sanitize(plan.document_name, "document"), root)
-    dual = plan.printer.nozzle_count > 1
-    copies = plan.settings.copies > 1  # laid out by os2slice, in a 3MF
-    as_3mf = force_3mf or plan.multi or copies or (dual and plan.slot is not None)
-    threemf = None
-
-    if not as_3mf:
-        progress("Exporting the part from Onshape")
-        stl = orient_stl(onshape.export_stl(req, units="millimeter"), rotation)
-        progress("Uploading to BamBuddy")
-        name = _file_name(cfg, plan, "stl", now)
-        file_id = bambuddy.upload(folder, name, stl)
-        progress("Slicing")
-        job = bambuddy.start_slice(
-            file_id,
-            plan.presets,
-            plan.settings,
-            auto_orient=plan.orientation.kind == "auto",
-            filament_colours=[plan.slot.color] if plan.slot else None,
-            bed_type=plan.bed_type,
-        )
-        filament_slots = [plan.slot] if plan.slot else []
-    else:
-        progress(f"Exporting {len(plan.parts)} part(s) from Onshape")
-        asm = assemble(plan, onshape, rotation)
-        filament_slots = asm.slots
-        threemf = asm.threemf
-        presets_by_filament = asm.presets
-        # One filament: no tower needed. Several: try spots beside the part in turn.
-        towers: list[dict[str, str]] = [{}]
-        if len(filament_slots) > 1:
-            towers = tower_spots(plan.printer.model, asm.footprint) or [{}]
-        progress("Uploading to BamBuddy")
-        name = _file_name(cfg, plan, "3mf", now)
-        file_id = bambuddy.upload(folder, name, asm.threemf)
-        for attempt, tower in enumerate(towers, start=1):
-            progress("Slicing" if attempt == 1 else f"Slicing again, prime tower moved ({attempt})")
-            job = bambuddy.start_slice(
-                file_id,
-                plan.presets,
-                plan.settings,
-                auto_orient=plan.orientation.kind == "auto",
-                filament_colours=[s.color for s in filament_slots],
-                bed_type=plan.bed_type,
-                filament_presets=presets_by_filament,
-                extra_overrides=tower,
-                auto_arrange=plan.orientation.kind == "auto",
-            )
-            try:
-                sliced = bambuddy.wait_for_slice(job, on_status=lambda s: progress(f"Slicing: {s}"))
-                break
-            except BambuddyError as e:
-                tower_problem = any(w in e.message.lower() for w in TOWER_ERRORS)
-                if not tower_problem or attempt == len(towers):
-                    raise
-                log.info("tower at %s rejected: %s", tower, e.message)
-
-    if not as_3mf:
-        sliced = bambuddy.wait_for_slice(job, on_status=lambda s: progress(f"Slicing: {s}"))
-    log.info("sliced %s → library file %s", name, sliced.library_file_id)
-    if dual and filament_slots and all(s.extruder is not None for s in filament_slots):
-        # Every filament must print on the nozzle its slot feeds.
-        data = bambuddy.download_file(sliced.library_file_id)
-        for n, s in enumerate(filament_slots, start=1):
-            got = sliced_nozzle(data, n)
-            if got != s.extruder:
-                raise BambuddyError(
-                    f"Filament {n} prints on the {NOZZLE_NAMES.get(got, 'unknown')} nozzle, but "
-                    f"{s.label} feeds the {NOZZLE_NAMES[s.extruder]} one; not queued",  # type: ignore[index]
-                    "BamBuddy's slicer changed how it maps nozzles; see docs/BAMBUDDY_API.md",
-                )
-
+    `force_3mf` asks the slicer for a project-style slice (several parts' layout even
+    for one part), which "Open in Bambu Studio" needs.
+    """
+    slicer = modules.slicer_for(plan.printer)
+    target = modules.target_for(plan.printer)
+    media = media_for(slicer.spec, target.spec)
+    job = slice_input(plan, cfg, onshape, media, progress=progress, now=now, project=force_3mf)
+    output = slicer.slice(job, progress)
     if not queue:
-        return PrintOutcome(sliced, None, threemf)
+        return PrintOutcome(job, output, None)
     progress(f"Queueing on {plan.printer.name}")
-    mapping, use_ams = None, None
-    if len(filament_slots) == 1 and filament_slots[0].external:
-        mapping, use_ams = None, False  # one external spool: bypass the AMS (to verify)
-    elif filament_slots:
-        mapping, use_ams = [s.tray_id for s in filament_slots], True
-    item = bambuddy.queue_print(
-        sliced.library_file_id, plan.printer.id, plan.manual_start, mapping, use_ams
+    submission = target.submit(
+        plan.printer,
+        output,
+        start=not plan.manual_start,
+        materials=distinct_materials(job.parts),
+        progress=progress,
     )
-    return PrintOutcome(sliced, item, threemf)
+    return PrintOutcome(job, output, submission)
 
 
 def studio_project(
     plan: PrintPlan,
     cfg: Config,
     onshape: OnshapeClient,
-    bambuddy: BambuddyClient,
+    modules: Modules,
     progress: Progress = lambda s: None,
 ) -> bytes:
     """A Bambu Studio project of the plan: its geometry plus the printer, filament and
-    process settings BamBuddy sliced it with (presets, colours, plate, walls/infill/
-    supports, prime tower). Slices but never queues. Falls back to geometry only (logged)
-    when the slice fails, so the part still opens.
+    process settings the printer's slicer sliced it with (presets, colours, plate,
+    walls/infill/supports, prime tower). Slices but never queues. Falls back to
+    geometry only (logged) when the slice fails, so the part still opens.
     """
+    slicer = modules.slicer_for(plan.printer)
+    job = slice_input(plan, cfg, onshape, MEDIA_GCODE_3MF, progress=progress, project=True)
+    geometry = bambu_project.build_project(job)
     try:
-        outcome = execute_print(
-            plan, cfg, onshape, bambuddy, queue=False, progress=progress, force_3mf=True
-        )
-        if outcome.threemf is None:
-            raise ValueError("no 3MF was built")
-        sliced = bambuddy.download_file(outcome.slice.library_file_id)
-        return with_project_settings(outcome.threemf, project_settings_of(sliced))
-    except (BambuddyError, ValueError) as e:
+        if MEDIA_GCODE_3MF not in slicer.spec.makes:
+            raise ValueError(f"{slicer.spec.label} doesn't make Bambu projects")
+        sliced = slicer.slice(job, progress)
+        return with_project_settings(geometry, project_settings_of(sliced.data))
+    except (ModuleError, ValueError) as e:
         log.warning("opening %s without slicer settings: %s", plan.part_name, e)
-        return assemble(plan, onshape).threemf
-
-
-@dataclass(frozen=True)
-class Assembly:
-    threemf: bytes  # the parts as one object (one instance per copy), centred on the bed
-    slots: list[Slot]  # filament n is slots[n-1] (empty when printing with the preset)
-    presets: list[str]  # filament preset per filament
-    footprint: tuple[float, float, float, float]  # x0, y0, x1, y1 of all copies on the bed, mm
-
-
-def assemble(plan: PrintPlan, onshape: OnshapeClient, rotation: Matrix | None = None) -> Assembly:
-    """Export the plan's parts and pack them into one Bambu-style 3MF object.
-
-    Used both to print (uploaded to BamBuddy) and to open in Bambu Studio. Parts
-    share one rotation and one drop; the assembly (or the grid of its copies) is
-    centred on the printer's bed;
-    each distinct slot becomes a filament, pinned to its nozzle on dual-nozzle
-    printers. Without slots every part is filament 1.
-    """
-    req = plan.req
-    if rotation is None:
-        rotation = rotation_for(plan.orientation, onshape, req, [p.part_id for p in plan.parts])
-    stls = [
-        onshape.export_stl(replace(req, part_id=p.part_id), units="millimeter") for p in plan.parts
-    ]
-    placed = orient_parts(stls, rotation)
-    bed_w, bed_d = BED_MM.get(plan.printer.model, (256, 256))
-    boxes = [bounding_box(s) for s in placed]
-    x0, y0 = min(b[0][0] for b in boxes), min(b[0][1] for b in boxes)
-    x1, y1 = max(b[1][0] for b in boxes), max(b[1][1] for b in boxes)
-    dx, dy = bed_w / 2 - (x0 + x1) / 2, bed_d / 2 - (y0 + y1) / 2
-    placed = [translate_xy(s, dx, dy) for s in placed]
-    gap = COPY_GAP + (BRIM_GAP if plan.settings.brim else 0.0)
-    offsets = copy_offsets((x1 - x0, y1 - y0), plan.settings.copies, (bed_w, bed_d), gap)
-    slots: list[Slot] = []
-    presets: list[str] = []
-    index: dict[int, int] = {}
-    for p in plan.parts:
-        if p.slot is not None and p.slot.tray_id not in index:
-            index[p.slot.tray_id] = len(slots) + 1
-            slots.append(p.slot)
-            presets.append(p.filament_preset)
-    if not slots:
-        presets = [plan.presets.filament]
-    parts = [
-        Part(p.name, stl, index[p.slot.tray_id] if p.slot else 1)
-        for p, stl in zip(plan.parts, placed, strict=True)
-    ]
-    dual = plan.printer.nozzle_count > 1
-    maps = [1 if s.extruder == 1 else 2 for s in slots] if dual and slots else None
-    ox0, oy0 = min(o[0] for o in offsets), min(o[1] for o in offsets)
-    ox1, oy1 = max(o[0] for o in offsets), max(o[1] for o in offsets)
-    return Assembly(
-        build_3mf(parts, plan.part_name, maps, offsets),
-        slots,
-        presets,
-        (x0 + dx + ox0, y0 + dy + oy0, x1 + dx + ox1, y1 + dy + oy1),
-    )
-
-
-def _file_name(cfg: Config, plan: PrintPlan, ext: str, now: datetime | None) -> str:
-    return files.export_path(
-        cfg.export_dir, plan.document_name, plan.part_name, plan.req.configuration, ext, now
-    ).name
+        return geometry
