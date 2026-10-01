@@ -18,6 +18,10 @@ Both flavours get the same profile stubs (with `resolveProfileInheritance=true` 
 and the process overrides written into the process stub. The flavour is probed once
 (`GET /profiles/bundled`). Only the configured URL is called; ids from responses are
 validated and URLs are built locally, never followed.
+
+Several parts, copies or a pinned nozzle go up as the Bambu project `bambu_project.layout`
+builds (the same layout BamBuddy gets); with more than one filament the prime tower is
+placed and retried by `bambu_project.with_tower_retries` (D-20, D-30).
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
+from os2slice.modules.bambu_project import Project, layout, with_tower_retries
 from os2slice.modules.base import (
     MEDIA_GCODE,
     MEDIA_GCODE_3MF,
@@ -44,23 +49,17 @@ from os2slice.modules.base import (
     Health,
     Material,
     Media,
+    ModuleAuthError,
     ModuleError,
     ModuleSpec,
-    PartGeometry,
     ProfileCatalog,
     Progress,
     SliceInput,
     SliceOutput,
 )
 from os2slice.orientation import bounding_box, translate_xy
-from os2slice.threemf import Part, build_3mf
 
 Flavour = Literal["afk", "resolver"]
-
-# Copies (D-25): gap between neighbours, more with a brim, and a margin around the bed, mm.
-# TODO(9a merge): use bambu_project.copy_offsets (and its constants) instead of _grid.
-COPY_GAP, BRIM_GAP, BED_MARGIN = 6.0, 10.0, 5.0
-DEFAULT_BED = (256.0, 256.0)  # when the printer doesn't say (the core's fallback too)
 
 REQUEST_ID_RE = re.compile(r"^[0-9A-Za-z-]{8,64}$")
 OVERRIDE_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -153,8 +152,10 @@ class SlicerApi:
         timeout_s: float = 900,
         api_key: str = "",
         *,
+        key: str = "",
         transport: httpx.BaseTransport | None = None,
     ) -> None:
+        self.key = key or self.spec.kind  # its [slicers.<key>] name, for error messages
         parts = urlsplit(url.strip())
         if parts.scheme not in ("http", "https") or not parts.hostname:
             raise ModuleError(f"{self.spec.label}: {url[:80]!r} isn't an http(s) URL")
@@ -171,13 +172,18 @@ class SlicerApi:
 
     @classmethod
     def from_values(
-        cls, values: Mapping[str, Any], *, transport: httpx.BaseTransport | None = None
+        cls,
+        values: Mapping[str, Any],
+        *,
+        key: str = "",
+        transport: httpx.BaseTransport | None = None,
     ) -> SlicerApi:
         """The registry factory: validated field values (secret already resolved)."""
         return cls(
             str(values["url"]),
             values.get("timeout_s") or 900,
             str(values.get("api_key") or ""),
+            key=key,
             transport=transport,
         )
 
@@ -217,7 +223,7 @@ class SlicerApi:
 
     def _json(self, resp: httpx.Response, what: str) -> Any:
         if resp.status_code >= 400:
-            raise _refused(resp, what)
+            raise _refused(resp, what, self.key)
         try:
             return resp.json()
         except ValueError as e:
@@ -252,18 +258,25 @@ class SlicerApi:
         checks = body.get("checks") if isinstance(body.get("checks"), dict) else {}
         slicer = checks.get("orcaslicer") if isinstance(checks.get("orcaslicer"), dict) else {}
         version = str(slicer.get("version") or "")
-        problems = [
-            f"{name}: {c.get('error')}"
+        failing = {
+            name: str(c.get("error"))
             for name, c in checks.items()
             if isinstance(c, dict) and c.get("error")
-        ]
+        }
         ok = resp.status_code == 200 and body.get("status") == "healthy"
+        detail = ""
+        if not ok and slicer.get("available") and set(failing) == {"dataPath"}:
+            # The resolver flavour reports itself unhealthy without a writable DATA_PATH,
+            # which only its stored user profiles need; os2slice uploads its profiles, so
+            # slicing works (docs/SLICERAPI_API.md). Pass, with a warning.
+            ok = True
+            detail = f"dataPath: {failing.pop('dataPath')[:200]} (harmless: profiles are uploaded)"
         summary = f"{self.spec.label} {'healthy' if ok else 'unhealthy'}"
         if version and version != "unknown":
             summary += f", slicer {version}"
-        if problems:
-            summary += f" ({'; '.join(problems)[:200]})"
-        return Health(ok, summary, version, json.dumps(body)[:1000])
+        if failing:
+            summary += f" ({'; '.join(f'{k}: {v}' for k, v in failing.items())[:200]})"
+        return Health(ok, summary, version, detail)
 
     def profiles(self, printer_model: str = "") -> ProfileCatalog:
         if self.flavour() == "resolver":
@@ -314,32 +327,22 @@ class SlicerApi:
                 "Set the printer's profiles in the config",
             )
         flavour = self.flavour()
-        model_name, model, filaments = self._model(job)
+        model_name, model, filaments, project = self._model(job)
         if flavour == "afk" and len(filaments) > 1:
             raise ModuleError(
                 "This OrcaSlicer API sidecar takes one filament per slice",
                 "Print multi-material parts through the bambu-studio-api (BamBuddy) sidecar",
             )
         model_type = "model/3mf" if model_name.endswith(".3mf") else "model/stl"
-        # extra["process_overrides"]: what the core adds, e.g. the prime tower spot that
-        # multi-filament plates need (D-20; without one the slicer refuses with "G-code
-        # outside the printable area"). TODO(9a merge): bambu_project.tower_spots + retry.
-        extra = job.extra.get("process_overrides")
-        overrides = {
-            **job.settings.process_overrides(),
-            **(extra if isinstance(extra, Mapping) else {}),
-        }
         printer = _stub(job.profiles.printer, "machine")
-        process = _stub(job.profiles.process, "process", overrides)
-        files: list[tuple[str, tuple[str, bytes, str]]] = [
+        common: list[tuple[str, tuple[str, bytes, str]]] = [
             ("file", (model_name, model, model_type)),
             _json_part("printerProfile", "printer.json", printer),
-            _json_part("presetProfile", "preset.json", process),
         ]
         for n, f in enumerate(filaments, start=1):
             colour = {"filament_colour": [f.colour]} if f.colour else {}
             stub = _stub(f.profile, "filament", colour)
-            files.append(_json_part("filamentProfile", f"filament_{n}.json", stub))
+            common.append(_json_part("filamentProfile", f"filament_{n}.json", stub))
         data = {"plate": "1"}
         if media == MEDIA_GCODE_3MF:
             data["exportType"] = "3mf"
@@ -352,50 +355,50 @@ class SlicerApi:
             data["bedType"] = job.bed_type
         if flavour == "afk":
             data["resolveProfileInheritance"] = "true"
-            try:
-                out, stats, rid = self._slice_async(files, data, progress)
-            except ModuleError as e:
-                raise self._explain(e, job, filaments) from e
-        else:
-            out, stats, rid = self._slice_sync(files, data, progress)
+
+        def attempt(tower: dict[str, str]) -> tuple[bytes, _Stats, str]:
+            # The core's settings and extra keys, then the prime tower spot that a
+            # multi-filament plate needs (without one the slicer refuses with "G-code
+            # outside the printable area").
+            overrides = {
+                **job.settings.process_overrides(),
+                **job.process_overrides,
+                **tower,
+            }
+            process = _stub(job.profiles.process, "process", overrides)
+            files = [*common, _json_part("presetProfile", "preset.json", process)]
+            if flavour == "afk":
+                try:
+                    return self._slice_async(files, data, progress)
+                except ModuleError as e:
+                    raise self._explain(e, job, filaments) from e
+            return self._slice_sync(files, data, progress)
+
+        spots = project.tower_spots(job.printer) if project is not None else [{}]
+        out, stats, rid = with_tower_retries(spots, attempt, progress)
         return self._output(job, media, out, stats, flavour, rid, model_name, filaments)
 
     # -- input --------------------------------------------------------------------
 
-    def _model(self, job: SliceInput) -> tuple[str, bytes, list[_Filament]]:
-        """The model file to upload and the filaments in slot order."""
+    def _model(self, job: SliceInput) -> tuple[str, bytes, list[_Filament], Project | None]:
+        """The model file to upload, the filaments in slot order, and the project layout
+        (None for a plain STL)."""
         stem = re.sub(r"[^A-Za-z0-9._-]", "_", job.job_name)[:60].strip("._") or "model"
         pinned = job.printer.nozzle_count > 1 and any(
             p.material is not None and p.material.extruder is not None for p in job.parts
         )
-        bed = job.printer.bed_mm or DEFAULT_BED
         if len(job.parts) == 1 and job.copies == 1 and not pinned:
             part = job.parts[0]
             stl = part.stl
             if not job.auto_arrange and job.printer.bed_mm:
-                stl = _centred([stl], bed)[0]
-            return f"{stem}.stl", stl, [_filament(part.material, job.profiles.filament)]
-        # Several parts, copies or a pinned nozzle: one Bambu-style 3MF object (D-20, D-25).
-        slots: list[str] = []
-        filaments: list[_Filament] = []
-        for p in job.parts:
-            key = p.material.id if p.material else ""
-            if key not in slots:
-                slots.append(key)
-                filaments.append(_filament(p.material, job.profiles.filament))
-        placed = _centred([p.stl for p in job.parts], bed)
-        lo, hi = _box(placed)
-        gap = COPY_GAP + (BRIM_GAP if job.settings.brim else 0.0)
-        offsets = _grid((hi[0] - lo[0], hi[1] - lo[1]), job.copies, bed, gap)
-        maps = None
-        if pinned:
-            mats = [_material_of(job.parts, k) for k in slots]
-            maps = [1 if m is not None and m.extruder == 1 else 2 for m in mats]
-        parts = [
-            Part(p.name, stl, slots.index(p.material.id if p.material else "") + 1)
-            for p, stl in zip(job.parts, placed, strict=True)
-        ]
-        return f"{stem}.3mf", build_3mf(parts, job.job_name, maps, offsets), filaments
+                stl = _centred([stl], job.printer.bed_mm)[0]
+            return f"{stem}.stl", stl, [_filament(part.material, job.profiles.filament)], None
+        # Several parts, copies or a pinned nozzle: one Bambu-style 3MF object (D-20, D-25),
+        # laid out as for BamBuddy. Too many copies is refused here, before any upload.
+        project = layout(job)
+        filaments = [_filament(m, job.profiles.filament) for m in project.filaments]
+        filaments = filaments or [_filament(None, job.profiles.filament)]
+        return f"{stem}.3mf", project.threemf, filaments, project
 
     # -- slicing ------------------------------------------------------------------
 
@@ -438,7 +441,7 @@ class SlicerApi:
                     f"Couldn't download the sliced file: {e or type(e).__name__}"
                 ) from e
         if result.status_code >= 400:
-            raise _refused(result, "sliced file")
+            raise _refused(result, "sliced file", self.key)
         with contextlib.suppress(httpx.RequestError):
             self._client.delete(f"/slice-async/{rid}")  # tidy the sidecar; best effort
         stats = _Stats(
@@ -489,7 +492,7 @@ class SlicerApi:
             raise ModuleError(f"Slicing request failed: {error}") from error
         resp: httpx.Response = box["resp"]
         if resp.status_code >= 400:
-            raise _refused(resp, "slice request")
+            raise _refused(resp, "slice request", self.key)
         stats = _Stats(
             _pos_int(resp.headers.get("x-print-time-seconds")),
             _pos_float(resp.headers.get("x-filament-used-g")),
@@ -648,10 +651,6 @@ def _filament(material: Material | None, default: str) -> _Filament:
     return _Filament(profile, material.colour if material else None)
 
 
-def _material_of(parts: tuple[PartGeometry, ...], key: str) -> Material | None:
-    return next((p.material for p in parts if (p.material.id if p.material else "") == key), None)
-
-
 def _box(stls: list[bytes]) -> tuple[tuple[float, float], tuple[float, float]]:
     boxes = [bounding_box(s) for s in stls]
     lo = (min(b[0][0] for b in boxes), min(b[0][1] for b in boxes))
@@ -664,35 +663,6 @@ def _centred(stls: list[bytes], bed: tuple[float, float]) -> list[bytes]:
     lo, hi = _box(stls)
     dx, dy = bed[0] / 2 - (lo[0] + hi[0]) / 2, bed[1] / 2 - (lo[1] + hi[1]) / 2
     return [translate_xy(s, dx, dy) for s in stls]
-
-
-def _grid(
-    size: tuple[float, float], copies: int, bed: tuple[float, float], gap: float
-) -> list[tuple[float, float]]:
-    """X/Y offsets for `copies` of a (w, d) footprint: the squarest grid that fits the
-    bed (less a margin), centred on the original position. Refuses when none fits.
-    TODO(9a merge): use bambu_project.copy_offsets.
-    """
-    w, d = size
-    room_w, room_d = bed[0] - 2 * BED_MARGIN, bed[1] - 2 * BED_MARGIN
-    best: tuple[float, int, int] | None = None
-    for cols in range(1, copies + 1):
-        rows = -(-copies // cols)
-        grid_w, grid_d = cols * w + (cols - 1) * gap, rows * d + (rows - 1) * gap
-        if grid_w <= room_w and grid_d <= room_d:
-            score = max(grid_w / room_w, grid_d / room_d)
-            if best is None or score < best[0]:
-                best = (score, cols, rows)
-    if best is None:
-        raise ModuleError(
-            f"{copies} {'copies' if copies > 1 else 'copy'} don't fit on the plate",
-            f"Each copy is {w:.0f} x {d:.0f} mm on a {bed[0]:.0f} x {bed[1]:.0f} mm bed; "
-            "print fewer copies",
-        )
-    _, cols, rows = best
-    pitch_x, pitch_y = w + gap, d + gap
-    x0, y0 = -(cols - 1) * pitch_x / 2, -(rows - 1) * pitch_y / 2
-    return [(x0 + (n % cols) * pitch_x, y0 + (n // cols) * pitch_y) for n in range(copies)]
 
 
 def _entries(raw: Any) -> list[tuple[str, list[str] | None]]:
@@ -711,8 +681,15 @@ def _norm(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", text.lower())
 
 
-def _refused(resp: httpx.Response, what: str) -> ModuleError:
+def _refused(resp: httpx.Response, what: str, key: str = "") -> ModuleError:
     """The sidecar's own reason: `{"message", "details"?}` (details = the CLI's stderr)."""
+    if resp.status_code in (401, 403):
+        # The sidecar has no auth; this is a reverse proxy in front of it.
+        return ModuleAuthError(
+            f"The slicer refused the {what} (HTTP {resp.status_code})",
+            f"Check the API key for [slicers.{key}] (secret slicers.{key}.api_key) "
+            "that the proxy in front of the sidecar wants",
+        )
     try:
         body = resp.json()
     except ValueError:

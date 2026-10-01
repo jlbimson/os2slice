@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from os2slice.errors import ConfigError
-from os2slice.modules.base import ModuleError, PrinterInfo, SliceOutput, Target
+from os2slice.modules.base import ModuleAuthError, ModuleError, PrinterInfo, SliceOutput, Target
 from os2slice.modules.moonraker import SPEC, Moonraker, unique_name
 from tests.fakes_printers import MOONRAKER_URL, FakeMoonraker
 
@@ -231,7 +231,10 @@ def test_unauthorized_is_module_error() -> None:
     with pytest.raises(ModuleError, match=r"refused the request \(401: Unauthorized\)") as e:
         make(fake).submit(PRINTER, GCODE, start=False)
     assert "API key" in e.value.fix
+    assert isinstance(e.value, ModuleAuthError) and e.value.http_status == 502
     assert fake.uploads == []
+    with pytest.raises(ModuleAuthError):  # status() raises for auth, it isn't "offline"
+        make(fake).status(PRINTER)
 
 
 def test_server_error_is_module_error() -> None:

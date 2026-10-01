@@ -27,6 +27,7 @@ from os2slice.modules.base import (
     Field,
     Health,
     Material,
+    ModuleAuthError,
     ModuleError,
     ModuleSpec,
     PrinterInfo,
@@ -84,6 +85,10 @@ class PrusaLinkError(ModuleError):
         self.status = status
 
 
+class PrusaLinkAuthError(PrusaLinkError, ModuleAuthError):
+    """PrusaLink refused the API key (401/403)."""
+
+
 def check_url(url: str, what: str) -> str:
     """A configured http(s) base URL with no credentials, query or fragment."""
     parts = urlsplit(url.strip())
@@ -124,9 +129,11 @@ class PrusaLink:
         self,
         values: Mapping[str, Any],
         *,
+        key: str = "prusalink",
         transport: httpx.BaseTransport | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
+        self.key = key
         self.url = check_url(str(values.get("url") or ""), "PrusaLink url")
         key = str(values.get("api_key") or "")
         if not key:
@@ -176,7 +183,7 @@ class PrusaLink:
         caps = ver.get("capabilities")
         if isinstance(caps, dict) and caps.get("upload-by-put") is False:
             return Health(False, f"{summary}: no upload-by-put", firmware)
-        return Health(True, summary, firmware, f"api {ver.get('api', '?')}")
+        return Health(True, summary, firmware)
 
     def printers(self, configured: tuple[PrinterInfo, ...]) -> tuple[PrinterInfo, ...]:
         info: dict[str, Any] = {}
@@ -310,16 +317,21 @@ class PrusaLink:
         if r.is_success:
             return r
         code, reason = r.status_code, self._reason(r)
+        key_fix = (
+            f"Check the API key for [targets.{self.key}] (secret targets.{self.key}.api_key) "
+            "against the printer's Settings > Network > PrusaLink"
+        )
         fixes = {
-            401: "Check the API key (printer: Settings > Network > PrusaLink)",
-            403: "Check the API key (printer: Settings > Network > PrusaLink)",
+            401: key_fix,
+            403: key_fix,
             404: f"Check that the printer's {self.storage} storage is present (USB drive in?)",
             409: "",
             413: "The file is too large for the printer",
             507: f"The printer's {self.storage} storage is full; free some space",
         }
-        what = "refused the API key" if code in (401, 403) else f"error {code} on {path}"
-        raise PrusaLinkError(f"PrusaLink {what}{reason}", fixes.get(code, ""), code)
+        if code in (401, 403):
+            raise PrusaLinkAuthError(f"PrusaLink refused the API key{reason}", key_fix, code)
+        raise PrusaLinkError(f"PrusaLink error {code} on {path}{reason}", fixes.get(code, ""), code)
 
     @staticmethod
     def _reason(r: httpx.Response) -> str:

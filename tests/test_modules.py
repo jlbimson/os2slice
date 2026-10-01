@@ -13,6 +13,7 @@ from os2slice.modules.base import (
     MEDIA_GCODE_3MF,
     Material,
     ModelDefaults,
+    ModuleAuthError,
     ModuleError,
     PartGeometry,
     PrinterInfo,
@@ -184,6 +185,23 @@ def test_status_detail_when_the_plate_is_not_cleared() -> None:
     assert st.describe() == "RUNNING, waiting for the plate to be cleared" and not st.ready
 
 
+def test_status_offline_when_bambuddy_is_unreachable_but_auth_raises() -> None:
+    m = module(FakeBambuddy())
+    a1 = m.printers(())[0]
+
+    def down(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    m._transport = httpx.MockTransport(down)
+    st = m.status(a1)
+    assert (st.state, st.connected, st.ready) == ("offline", False, False)
+    assert "Can't reach BamBuddy" in st.detail
+    m._transport = httpx.MockTransport(lambda r: httpx.Response(401, json={"detail": "no"}))
+    with pytest.raises(ModuleAuthError, match="refused the API key") as e:
+        m.status(a1)
+    assert isinstance(e.value, AuthError)  # older callers still catch it as an AuthError
+
+
 def job_for(m: BambuddyModule, printer: str, parts: list[PartGeometry], **kw: object) -> SliceInput:
     info = next(p for p in m.printers(()) if p.name == printer)
     return SliceInput(
@@ -298,3 +316,37 @@ def test_bed_from_printer_info_wins() -> None:
 def test_copies_that_do_not_fit_are_refused() -> None:
     with pytest.raises(BadRequest, match="don't fit"):
         bambu_project.copy_offsets((100, 100), 2, (180, 180))
+
+
+# -- the registered kinds ------------------------------------------------------------
+
+
+def test_every_module_kind_is_registered() -> None:
+    from os2slice.modules.moonraker import Moonraker
+    from os2slice.modules.prusalink import PrusaLink
+    from os2slice.modules.slicerapi import BambuStudioApi, OrcaSlicerApi
+
+    assert set(registry.kinds()) == {
+        "bambuddy", "bambu-studio-api", "orca-slicer-api", "moonraker", "prusalink", "desktop",
+    }  # fmt: skip
+    assert registry.SLICERS["bambu-studio-api"] is BambuStudioApi
+    assert registry.SLICERS["orca-slicer-api"] is OrcaSlicerApi
+    assert registry.TARGETS["moonraker"] is Moonraker and registry.TARGETS["prusalink"] is PrusaLink
+    for kind, cls in {**registry.SLICERS, **registry.TARGETS}.items():
+        assert cls.spec.kind == kind
+
+
+def test_registry_builds_through_from_values() -> None:
+    from os2slice.modules.slicerapi import BambuStudioApi
+
+    s = registry.build_slicer(
+        "bambu-studio-api", {"url": "http://studio.test:3001", "timeout_s": 60, "api_key": None},
+        key="studio",
+    )  # fmt: skip
+    assert isinstance(s, BambuStudioApi) and isinstance(s, Slicer)
+    assert (s.timeout_s, s.key) == (60, "studio")
+    t = registry.build_target("moonraker", {"url": "http://voron.test:7125"}, key="voron")
+    assert isinstance(t, Target) and t.key == "voron"
+    with registry.Modules(slicers={"studio": s}, targets={"voron": t}):
+        pass
+    assert s._client.is_closed and t._client.is_closed  # Modules.close() closed both
