@@ -175,3 +175,21 @@ seam (9a) were joined:
 - `Health.detail` is a warning line, not information: the resolver sidecar's 503
   "unhealthy" for a missing `dataPath` alone (slicing works; BamBuddy's add-on answers
   that way) passes with a warning instead of failing `doctor`.
+
+## D-31: The config page, as built (Phase 9d, 2026-10-01)
+
+Calls made building `/admin` (D-28):
+- Server and Onshape settings saved on the page go to the file but not into the running
+  service: the socket, the Host check, the sign-in redirect URI and the Onshape client
+  were made from them at start, so changing them live could lock the admin out. Every
+  page says "restart needed" until then. Everything else (modules, printers, defaults,
+  export, web studio) applies at once through `Service.reload()`.
+- A save builds the new modules once as a trial before writing, so a missing required
+  secret or a module that refuses its values fails the form, not the reload.
+- Reload closes the replaced modules unless a print job is queued or running (it may
+  hold them); then they are left to the garbage collector.
+- CSRF tokens are bound to the admin session as well as the form's action; login has its
+  own token without a session. A POST without Sec-Fetch-Site is accepted only with an
+  `Origin` equal to the Host (older browsers), never with neither.
+- Module and printer names can't be renamed on the page (secrets are stored under the
+  name); remove and add instead. The file is rewritten whole, without its comments.

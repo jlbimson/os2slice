@@ -18,6 +18,11 @@ OPTIONS = Path("/data/options.json")
 DATA = Path("/data")
 SSL = Path("/ssl")
 PORT = 8443  # inside the container; the host port is set on the add-on's Network tab
+# Planned option (D-28, not packaged yet): `admin_password`, a password field on the
+# Configuration tab that turns the config page /admin on. At start it would be hashed
+# into <state dir>/admin.json with AdminStore.set_password (only when it changed), never
+# written anywhere else, logged or put in the environment. Until then the add-on has no
+# admin password, so /admin answers 503.
 SECRET_OPTIONS = {  # option -> environment variable, by [onshape] auth mode (D-23)
     "keys": {
         "onshape_access_key": "ONSHAPE_ACCESS_KEY",

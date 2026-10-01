@@ -109,7 +109,7 @@ secret store (`auth.get_secret`): the keyring entry of that name, then
 `OS2SLICE_SECRET_<SECTION>_<NAME>_<KEY>` (dots and dashes as underscores) in the
 environment (dev, the add-on and Docker). A required secret that's missing stops the
 service at start. `os2slice setup-keys --secret targets.farm.api_key` stores one; the
-config page will write secrets to the store and never show them.
+config page writes secrets to the store and never shows them.
 
 Compatibility: the old `[bambuddy]` table (with `[bambuddy.presets.<model>]`) is read
 as `[targets.bambuddy]` (kind `bambuddy`, slicing for itself) with the presets as
@@ -119,6 +119,36 @@ as the top-level one. `[bambuddy]` and `[targets.bambuddy]` can't both be set, n
 are read as `targets.bambuddy.api_key`, so existing configs, keys and the add-on keep
 working. `[print_defaults]`, `[onshape]`, `[server]`, `[export]`, `[web_studio]` are
 unchanged.
+
+## Configuring from the browser
+
+The config page `/admin` (D-28, `admin.py`) edits the same config.toml. It is off
+until an admin password is set on the server (`os2slice admin-password`), then:
+
+- **Slicers / Targets** list the configured modules with their kind, key fields
+  (secrets only as "set"/"not set") and health from `check()`. **Add** offers every
+  kind in `registry.kinds()` for that role (desktop hand-offs included, edited as
+  `name` + `argv`) and renders the form from `ModuleSpec.fields`: `str`/`url`/`path`
+  as text, `int` as a number, `bool` as a checkbox, `list` one per line, `choice` as a
+  select, `secret` as a write-only password input. A discovering target
+  (`discovers_printers`) also gets its per-model defaults (`models."<model>"`: slicer,
+  profiles, bed_type; `extra` is kept as it was). **Test connection** builds that one
+  module from the form (secrets from the form, else the store) and shows `check()`
+  without saving. A module needs no page code: a new kind appears once registered.
+- **Printers**: `[printers.*]` entries, plus the printers targets found (read-only,
+  with **Override** to create `[printers."<name>"]`) and `default_printer`. Profile
+  fields suggest the names the chosen slicer's `profiles()` returns.
+- **Onshape**, **Server**, **Print defaults**, **Secrets** (every
+  `<section>.<key>.<field>` the config implies), **Jobs**, **Log**, **Password**.
+- The legacy `[bambuddy]` table shows as "bambuddy (legacy table)" with **Migrate**,
+  which rewrites it as `[targets.bambuddy]` + `models` (presets' `source` →
+  `extra.preset_source`, its `default_printer` → the top level); the result parses to
+  the same `Config`.
+
+Saves are validated by `config.parse` before anything is written, the file is
+rewritten whole (comments are not kept), and the service reloads its modules at once;
+server and Onshape settings wait for a restart. In the Home Assistant add-on the file
+is regenerated from the add-on options at every start, so page edits last until then.
 
 ## What the core does with a printer
 
