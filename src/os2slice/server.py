@@ -33,13 +33,16 @@ from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import httpx
 
-from os2slice import __version__, files, printing
+from os2slice import __version__, admin, files, printing
+from os2slice.adminauth import AdminStore, admin_path
+from os2slice.auth import get_secret
 from os2slice.config import Config, WebStudioConfig
+from os2slice.config import load as load_config
 from os2slice.errors import AuthError, BadRequest, ConfigError, Os2sliceError
 from os2slice.jobs import CsrfTokens, Job, JobStore
 from os2slice.modules import bambu_project
 from os2slice.modules.base import Material, PrinterInfo, PrinterStatus
-from os2slice.modules.registry import Modules
+from os2slice.modules.registry import Modules, SecretLookup
 from os2slice.oauth import (
     SESSION_DAYS,
     BearerAuth,
@@ -181,7 +184,12 @@ def make_signin(
 
 
 class Service:
-    """Everything a request handler needs; built once per process."""
+    """Everything a request handler needs; built once per process.
+
+    `cfg` and `modules` are swapped together by `reload()` (the config page, D-28).
+    Server and Onshape settings stay as they were at start (`boot_cfg`): the socket,
+    the Host check and the Onshape client were made from them, so they need a restart.
+    """
 
     def __init__(
         self,
@@ -189,8 +197,15 @@ class Service:
         onshape: OnshapeFactory,
         modules: Modules,
         signin: SignIn | None = None,
+        *,
+        admin_store: AdminStore | None = None,
+        secrets: SecretLookup | None = None,
+        module_transport: httpx.BaseTransport | None = None,
+        module_transports: dict[str, httpx.BaseTransport] | None = None,
     ) -> None:
         self.cfg = cfg
+        self.boot_cfg = cfg  # what the socket, Host check and Onshape client use
+        self.file_cfg = cfg  # config.toml as last loaded (may differ: needs restart)
         self.onshape = onshape
         self.modules = modules  # slicers and targets (docs/MODULES.md)
         self.signin = signin
@@ -201,6 +216,68 @@ class Service:
             OrderedDict()
         )
         self.model_lock = threading.Lock()
+        self.admin = admin_store if admin_store is not None else AdminStore(admin_path())
+        self.secrets = secrets  # None: the secret store (auth.get_secret)
+        self.module_transport = module_transport  # tests: replace the network
+        self.module_transports = dict(module_transports or {})
+        self.restart_notes: set[str] = set()  # e.g. new Onshape keys (read once at start)
+        self._reload_lock = threading.Lock()
+
+    def secret(self, name: str) -> str | None:
+        return (self.secrets or get_secret)(name)
+
+    def transport_for(self, key: str) -> httpx.BaseTransport | None:
+        return self.module_transports.get(key, self.module_transport)
+
+    def build_modules(self, cfg: Config, overlay: dict[str, str] | None = None) -> Modules:
+        """The config's modules; `overlay` secrets win over the store (not saved yet)."""
+        extra = overlay or {}
+
+        def lookup(name: str) -> str | None:
+            return extra.get(name) or self.secret(name)
+
+        return Modules.from_config(
+            cfg, secrets=lookup, transport=self.module_transport,
+            transports=self.module_transports,
+        )  # fmt: skip
+
+    def reload(self) -> Config:
+        """Re-read config.toml, rebuild the modules and swap both in. Returns the file's
+        config. Raises (keeping the old config) if it doesn't load."""
+        with self._reload_lock:
+            new = load_config(self.cfg.path, create=False)
+            modules = self.build_modules(new)
+            boot = self.boot_cfg
+            running = replace(
+                new,
+                server=boot.server,
+                port=boot.port,
+                onshape_base_url=boot.onshape_base_url,
+                onshape_auth=boot.onshape_auth,
+                oauth_client_id=boot.oauth_client_id,
+                oauth_base_url=boot.oauth_base_url,
+            )
+            old = self.modules
+            self.cfg, self.modules, self.file_cfg = running, modules, new
+        log.warning("config reloaded from %s", new.path)
+        self._retire(old)
+        return new
+
+    def _retire(self, old: Modules) -> None:
+        """Close the replaced modules, unless a print job may still be using them."""
+        if self.jobs.busy():
+            log.info("a print job is running; the old modules are left to be collected")
+            return
+        seen: set[int] = set()
+        for module in (*old.targets.values(), *old.slicers.values()):
+            close = getattr(module, "close", None)
+            if id(module) in seen or not callable(close):
+                continue
+            seen.add(id(module))
+            try:
+                close()
+            except Exception:
+                log.warning("closing a replaced module failed", exc_info=True)
 
     def onshape_for(self, user_id: str | None) -> OnshapeClient:
         """API-key mode: the shared client. Sign-in mode: that user's own access."""
@@ -319,7 +396,9 @@ class _Handler(BaseHTTPRequestHandler):
                 self._who = self._signed_in_user()
                 if self._who is not None:
                     user = f"onshape:{self._who.user_id}"
-            if url.path == "/health" and method == "GET":
+            if url.path == "/admin" or url.path.startswith("/admin/"):
+                admin.handle(self, method, url)  # the config page (D-28)
+            elif url.path == "/health" and method == "GET":
                 self._send(200, f'{{"ok": true, "version": "{__version__}"}}\n'.encode(),
                            "application/json")  # fmt: skip
             elif url.path == "/print" and method == "GET":
