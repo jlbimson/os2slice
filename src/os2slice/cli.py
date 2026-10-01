@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from os2slice import __version__, auth, config, notify, pipeline, printing
 from os2slice.bambuddy import BambuddyClient
@@ -27,6 +28,9 @@ from os2slice.request import (
 )
 from os2slice.settings import SUPPORTS, PrintSettings
 from os2slice.slicers import flatpak_app_id, resolve_executable
+
+if TYPE_CHECKING:
+    from os2slice import server
 
 log = logging.getLogger("os2slice")
 
@@ -125,6 +129,9 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("doctor", help="check keys, config and slicers")
     d.add_argument("--offline", action="store_true", help="don't call the Onshape API")
     d.set_defaults(func=cmd_doctor)
+
+    a = sub.add_parser("admin-password", help="set the password of the config page (/admin)")
+    a.set_defaults(func=cmd_admin_password)
     return p
 
 
@@ -189,8 +196,10 @@ def cmd_print(args: argparse.Namespace) -> int:
         },
         cfg.print_defaults,
     )
-    modules = registry.Modules.from_config(cfg)
-    with OnshapeClient(cfg.onshape_base_url, auth.load_keys()) as onshape:
+    with (
+        registry.Modules.from_config(cfg) as modules,
+        OnshapeClient(cfg.onshape_base_url, auth.load_keys()) as onshape,
+    ):
         wanted = args.part or [None]
         slots = args.slot or []
         if len(wanted) > 1 and len(slots) != len(wanted):
@@ -234,6 +243,18 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if not cfg.targets:
         raise config.ConfigError("No printers are configured", f"Add [targets.*] to {cfg.path}")
     modules = registry.Modules.from_config(cfg)
+    try:
+        service = _make_service(cfg, modules)
+    except BaseException:
+        modules.close()
+        raise
+    server.serve(service)  # closes the service's modules when it stops
+    return 0
+
+
+def _make_service(cfg: config.Config, modules: registry.Modules) -> server.Service:
+    from os2slice import server
+
     signin = None
     if cfg.onshape_auth == "oauth":
         # Each user signs in (D-23); the shared API keys aren't used by the service.
@@ -256,9 +277,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         def onshape() -> OnshapeClient:
             return OnshapeClient(cfg.onshape_base_url, keys)
 
-    service = server.Service(cfg, onshape=onshape, modules=modules, signin=signin)
-    server.serve(service)
-    return 0
+    return server.Service(cfg, onshape=onshape, modules=modules, signin=signin)
 
 
 def _confirm(prompt: str) -> bool:
@@ -351,9 +370,20 @@ def _setup_secret(name: str, from_env: bool) -> int:
     return 0
 
 
+# -- admin-password -----------------------------------------------------------
+
+
+def cmd_admin_password(args: argparse.Namespace) -> int:
+    """Set the config page's password (D-28). Only here, never from a browser."""
+    from os2slice.adminauth import AdminStore, admin_path, set_password_interactive
+
+    return 0 if set_password_interactive(AdminStore(admin_path())) else 1
+
+
 # -- doctor -------------------------------------------------------------------
 
-PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
+PASS, WARN, FAIL, NOTE = "PASS", "WARN", "FAIL", "NOTE"  # NOTE: informational, never fails
+Add = Callable[[str, str, str], None]
 ADDON = (
     os.environ.get("OS2SLICE_ADDON") == "1"
 )  # set by the Home Assistant add-on and the Docker image
@@ -372,15 +402,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except Os2sliceError as e:
         add(FAIL, "config", e.one_line())
 
-    if cfg and cfg.onshape_auth == "oauth":
-        # Per-user sign-in (D-23): no shared keys; check the OAuth app's client instead.
-        try:
-            auth.load_oauth_client_secret()
-            add(PASS, "Onshape sign-in", f"per user; redirect URI {cfg.oauth_redirect_uri}")
-        except Os2sliceError as e:
-            add(FAIL, "Onshape sign-in", e.one_line())
-    else:
-        _check_keys(cfg, args, add)
+    check_onshape(cfg, args.offline, add)
 
     if cfg and not ADDON:
         _check_export_dir(cfg, add)
@@ -391,6 +413,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     if cfg:
         _check_modules(cfg, add, offline=args.offline)
+    check_admin_password(add)
 
     if ADDON:
         pass  # no desktop inside the add-on; the page and the log report errors
@@ -406,9 +429,30 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 1 if any(s == FAIL for s, _, _ in rows) else 0
 
 
-def _check_keys(
-    cfg: config.Config | None, args: argparse.Namespace, add: Callable[[str, str, str], None]
-) -> None:
+def check_onshape(cfg: config.Config | None, offline: bool, add: Add) -> None:
+    """Onshape credentials: the OAuth client secret (D-23), or the shared API keys."""
+    if cfg and cfg.onshape_auth == "oauth":
+        # Per-user sign-in (D-23): no shared keys; check the OAuth app's client instead.
+        try:
+            auth.load_oauth_client_secret()
+            add(PASS, "Onshape sign-in", f"per user; redirect URI {cfg.oauth_redirect_uri}")
+        except Os2sliceError as e:
+            add(FAIL, "Onshape sign-in", e.one_line())
+    else:
+        _check_keys(cfg, offline, add)
+
+
+def check_admin_password(add: Add) -> None:
+    """Whether the config page has a password (a note: /admin is optional, D-28)."""
+    from os2slice.adminauth import AdminStore, admin_path
+
+    if AdminStore(admin_path()).has_password():
+        add(PASS, "admin password", "set; the config page /admin is on")
+    else:
+        add(NOTE, "admin password", "not set, so /admin is off; `os2slice admin-password` sets it")
+
+
+def _check_keys(cfg: config.Config | None, offline: bool, add: Add) -> None:
     keys = None
     try:
         keys = auth.load_keys()
@@ -423,7 +467,7 @@ def _check_keys(
     except Os2sliceError as e:
         add(FAIL, "API keys", e.one_line())
 
-    if cfg and keys and not args.offline:
+    if cfg and keys and not offline:
         try:
             with OnshapeClient(cfg.onshape_base_url, keys) as client:
                 email = client.check_keys()
@@ -432,8 +476,22 @@ def _check_keys(
             add(FAIL, "Onshape login", e.one_line())
 
 
-def _check_modules(cfg: config.Config, add: Callable[[str, str, str], None], offline: bool) -> None:
+def _check_modules(cfg: config.Config, add: Add, offline: bool) -> None:
     """A row per secret and per configured slicer/target module (its own `check()`)."""
+    missing = check_module_secrets(cfg, add)
+    if offline or missing:
+        return
+    try:
+        modules = registry.Modules.from_config(cfg)
+    except Os2sliceError as e:
+        add(FAIL, "modules", e.one_line())
+        return
+    with modules:
+        check_module_health(modules, add)
+
+
+def check_module_secrets(cfg: config.Config, add: Add) -> bool:
+    """A row per module secret (never its value). True when a required one is missing."""
     sections = [("targets", t) for t in cfg.targets.values()]
     sections += [("slicers", s) for s in cfg.slicer_modules.values()]
     missing = False
@@ -452,13 +510,11 @@ def _check_modules(cfg: config.Config, add: Callable[[str, str, str], None], off
                 add(FAIL, name, "not in the keyring or the environment; run `os2slice "
                     + ("setup-keys --bambuddy`" if name == auth.BAMBUDDY_SECRET
                        else f"setup-keys --secret {name}`"))  # fmt: skip
-    if offline or missing:
-        return
-    try:
-        modules = registry.Modules.from_config(cfg)
-    except Os2sliceError as e:
-        add(FAIL, "modules", e.one_line())
-        return
+    return missing
+
+
+def check_module_health(modules: registry.Modules, add: Add) -> None:
+    """A row per built slicer/target module, from its own `check()`."""
     seen: set[int] = set()
     for section, key, module in [
         *(("target", k, t) for k, t in modules.targets.items()),
@@ -469,13 +525,17 @@ def _check_modules(cfg: config.Config, add: Callable[[str, str, str], None], off
         seen.add(id(module))
         role = "slicer + target" if module.spec.role == "both" else section
         label = f"{role} {key}"
-        health = module.check()
+        try:
+            health = module.check()
+        except Os2sliceError as e:
+            add(FAIL, label, f"{module.spec.label}: {e.one_line()}")
+            continue
         add(PASS if health.ok else FAIL, label, f"{module.spec.label}: {health.summary}")
         if health.detail:
             add(WARN, label, health.detail)
 
 
-def _check_export_dir(cfg: config.Config, add: Callable[[str, str, str], None]) -> None:
+def _check_export_dir(cfg: config.Config, add: Add) -> None:
     try:
         cfg.export_dir.mkdir(parents=True, exist_ok=True)
         if os.access(cfg.export_dir, os.W_OK):
@@ -486,7 +546,7 @@ def _check_export_dir(cfg: config.Config, add: Callable[[str, str, str], None]) 
         add(FAIL, "export dir", f"{cfg.export_dir}: {e.strerror}")
 
 
-def _check_slicer(s: config.SlicerConfig, add: Callable[[str, str, str], None]) -> None:
+def _check_slicer(s: config.SlicerConfig, add: Add) -> None:
     label = f"slicer {s.key}"
     exe = resolve_executable(s.argv[0])
     if exe is None:
