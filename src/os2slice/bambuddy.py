@@ -11,7 +11,8 @@ from typing import Any
 import httpx
 
 from os2slice import __version__
-from os2slice.errors import AuthError, Os2sliceError
+from os2slice.errors import AuthError
+from os2slice.modules.base import ModuleError
 from os2slice.settings import PrintSettings
 
 log = logging.getLogger(__name__)
@@ -20,9 +21,8 @@ FAILED_STATES = frozenset({"failed", "error", "cancelled", "canceled"})
 DONE_STATE = "completed"
 
 
-class BambuddyError(Os2sliceError):
-    exit_code = 6
-    http_status = 502
+class BambuddyError(ModuleError):
+    """BamBuddy refused or failed (exit code 6, HTTP 502)."""
 
 
 @dataclass(frozen=True)
@@ -105,12 +105,19 @@ class BambuddyClient:
 
     def filament_preset_names(self) -> list[str]:
         """Names of every filament preset BamBuddy can slice with (standard, cloud, local)."""
+        return self.preset_names()["filament"]
+
+    def preset_names(self) -> dict[str, list[str]]:
+        """Printer, process and filament preset names, local then cloud then standard."""
         body = self._json(self._request("GET", "/slicer/presets"))
-        names: list[str] = []
+        names: dict[str, list[str]] = {"printer": [], "process": [], "filament": []}
+        if not isinstance(body, dict):
+            return names
         for tier in ("local", "cloud", "standard"):
-            for item in (body.get(tier) or {}).get("filament") or []:
-                if isinstance(item, dict) and isinstance(item.get("name"), str):
-                    names.append(item["name"])
+            for kind, out in names.items():
+                for item in (body.get(tier) or {}).get(kind) or []:
+                    if isinstance(item, dict) and isinstance(item.get("name"), str):
+                        out.append(item["name"])
         return names
 
     def download_file(self, file_id: int) -> bytes:

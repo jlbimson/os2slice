@@ -109,6 +109,19 @@ class PrinterInfo:
     active: bool = True
     ui_url: str = ""  # where a person watches it (BamBuddy queue, Mainsail, PrusaLink…)
     extra: Mapping[str, Any] = field(default_factory=dict)  # module-specific (bed_type, ip…)
+    # Configured materials ([printers.<key>] materials), for targets that can't report
+    # what's loaded; the filament menu falls back to these when status() has none.
+    materials: tuple[Material, ...] = ()
+
+
+@dataclass(frozen=True)
+class ModelDefaults:
+    """[targets.<key>.models."<model>"]: defaults for printers a target discovers."""
+
+    slicer: str = ""  # [slicers.<key>]; "" = the target itself when its role is "both"
+    profiles: Profiles = Profiles()
+    bed_type: str | None = None
+    extra: Mapping[str, Any] = field(default_factory=dict)  # module-specific
 
 
 @dataclass(frozen=True)
@@ -135,7 +148,12 @@ class PartGeometry:
 
 @dataclass(frozen=True)
 class SliceInput:
-    """Everything a slicer needs. The core builds it; modules never read config directly."""
+    """Everything a slicer needs. The core builds it; modules never read config directly.
+
+    Filament numbering: filament n of the print is the n-th distinct `material` in
+    `parts` order (`distinct_materials`); no materials at all = one filament with
+    `profiles.filament`. A target's `submit(materials=...)` gets the same list.
+    """
 
     job_name: str  # safe for filenames (files.py sanitised it)
     printer: PrinterInfo
@@ -240,4 +258,19 @@ class Target(Protocol):
         ...
 
 
-Factory = Callable[..., Any]  # factory(values: Mapping[str, Any], *, transport=None) -> module
+def distinct_materials(parts: tuple[PartGeometry, ...]) -> tuple[Material, ...]:
+    """The print's filaments in order: each distinct part material (by id), first use first."""
+    seen: dict[str, Material] = {}
+    for p in parts:
+        if p.material is not None and p.material.id not in seen:
+            seen[p.material.id] = p.material
+    return tuple(seen.values())
+
+
+# factory(values: Mapping[str, Any], *, key: str, transport=None) -> module. `values` are
+# the validated config fields with secrets resolved (None when unset), plus "models"
+# for targets; `key` is the module's [slicers.<key>] / [targets.<key>] name.
+#
+# Optional on a target: `ui_url(request_host: str = "") -> str`, the page where a person
+# watches the queue, for links that don't belong to one printer (the panel, job pages).
+Factory = Callable[..., Any]
