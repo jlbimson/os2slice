@@ -60,9 +60,18 @@ src/os2slice/
   auth.py         keyring + env fallback
   onshape.py      httpx client: part name, document name, STL export (later: translations)
   files.py        naming, sanitizing, pruning
-  slicers.py      argv building + detached launch
+  slicers.py      argv building + detached launch (the desktop hand-off)
   notify.py       desktop notifications
   logsetup.py     rotating file log
+  printing.py     the print path: plan (read-only) → export, orient → slicer → target
+  bambuddy.py     BamBuddy REST client (used by modules/bambuddy.py)
+  filaments.py    AMS slots / external spools, preset matching, sliced-nozzle check
+  threemf.py      Bambu-style 3MF writer and project-settings transplant
+  modules/        slicer and target modules (docs/MODULES.md, D-27)
+    base.py           the contract: ModuleSpec, PrinterInfo, Material, SliceInput, protocols
+    registry.py       kind → class, spec_for, Modules (the configured modules of a process)
+    bambuddy.py       BamBuddy: slicer + target (role "both")
+    bambu_project.py  Bambu/Orca project layout (centring, copies, filaments, prime tower)
   platform/
     __init__.py   picks the implementation by sys.platform
     linux.py      systemd user unit install/uninstall/status

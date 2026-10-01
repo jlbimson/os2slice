@@ -47,8 +47,10 @@ def test_prepare_renders_a_valid_lan_config(
     assert cfg.server.identity == "lan" and cfg.server.bind == "0.0.0.0"
     assert cfg.server.hosts == ("print.example.duckdns.org:8443",)
     assert cfg.server.tls_cert == Path("/ssl/fullchain.pem")
-    assert cfg.bambuddy is not None and cfg.bambuddy.base_url == "http://172.30.32.1:8000"
-    assert cfg.bambuddy.presets['Odd "model"'].printer == "p\\x"
+    # The add-on still writes [bambuddy]; it's read as [targets.bambuddy] (docs/MODULES.md).
+    bambuddy = cfg.targets["bambuddy"]
+    assert bambuddy.kind == "bambuddy" and bambuddy.values["url"] == "http://172.30.32.1:8000"
+    assert bambuddy.models['Odd "model"'].profiles.printer == "p\\x"
     assert (cfg.print_defaults.walls, cfg.print_defaults.supports) == (3, "tree")
     d = cfg.print_defaults
     assert (d.brim, d.copies, d.top_layers, d.bottom_layers) == (True, 2, 5, 3)  # unset: defaults

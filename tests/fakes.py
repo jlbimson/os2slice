@@ -153,6 +153,15 @@ class FakeBambuddy:
         return httpx.Response(404, json={"detail": "Not Found"})
 
 
+def fake_modules(cfg: Any, handler: Any) -> Any:
+    """The config's slicer and target modules, all talking to `handler` (e.g. FakeBambuddy)."""
+    from os2slice.modules.registry import Modules
+
+    return Modules.from_config(
+        cfg, secrets=lambda name: "k", transport=httpx.MockTransport(handler)
+    )
+
+
 def fake_onshape(request: httpx.Request) -> httpx.Response:
     path = request.url.path
     base = f"/api/partstudios/d/{DOC}/w/{WS}/e/{ELEM}"
