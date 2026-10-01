@@ -46,6 +46,19 @@ USER_ID_RE = re.compile(r"[0-9a-f]{24}")
 SIGN_IN_AGAIN = "Sign in with Onshape again from the os2slice panel"
 
 
+def _oauth_error(r: httpx.Response) -> str:
+    """The OAuth error code and description from a token-endpoint refusal (no secrets)."""
+    try:
+        data = r.json()
+    except ValueError:
+        return "no JSON body"
+    if not isinstance(data, dict):
+        return "unexpected body"
+    code = re.sub(r"[^A-Za-z0-9_.\- ]", "?", str(data.get("error", "?")))[:40]
+    desc = re.sub(r"[^\w.,:;()'/\- ]", "?", str(data.get("error_description", "")))[:200]
+    return f"{code} {desc}".strip()
+
+
 @dataclass
 class Grant:
     """One Onshape user's tokens."""
@@ -108,7 +121,14 @@ class TokenEndpoint:
         except httpx.TransportError as e:
             raise OnshapeError(f"Can't reach Onshape sign-in ({type(e).__name__})") from e
         if r.status_code in (400, 401):
-            # invalid_grant: code used/expired, or the user revoked access
+            # invalid_grant: code used/expired, or access revoked (e.g. the app changed owner);
+            # invalid_client: the client ID/secret no longer match the Onshape app.
+            log.warning(
+                "Onshape token endpoint refused %s (%s): %s",
+                form["grant_type"],
+                r.status_code,
+                _oauth_error(r),
+            )
             raise AuthError("Onshape refused the sign-in", SIGN_IN_AGAIN)
         if not r.is_success:
             raise OnshapeError(f"Onshape sign-in failed ({r.status_code})", "Try again")

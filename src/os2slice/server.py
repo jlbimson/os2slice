@@ -603,9 +603,18 @@ class _Handler(BaseHTTPRequestHandler):
             self._scripts = True
             self._page(200, "Sign in", _sign_in_panel())
             return
-        with self._onshape() as onshape, self.svc.bambuddy() as bb:
-            parts = {str(p.get("partId")): str(p.get("name")) for p in onshape.list_parts(req)}
-            views = self._printer_views(bb)
+        try:
+            with self._onshape() as onshape, self.svc.bambuddy() as bb:
+                parts = {str(p.get("partId")): str(p.get("name")) for p in onshape.list_parts(req)}
+                views = self._printer_views(bb)
+        except AuthError:
+            if self.svc.signin is None:
+                raise
+            # Onshape refused the saved sign-in (revoked, e.g. after the app changed owner);
+            # the grant is gone, so offer a fresh sign-in rather than an error page.
+            self._scripts = True
+            self._page(200, "Sign in", _sign_in_panel())
+            return
         token = self.svc.tokens.issue(user, _bind_element(req))
         self._scripts = True
         ui = _bambuddy_ui(cfg, self.headers.get("Host", ""))
