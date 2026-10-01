@@ -78,6 +78,7 @@ FORM_FIELDS = frozenset(
         "csrf",
         "claim",  # /auth/claim (D-23)
         "printer",
+        "filament",  # the panel's own filament menu: a global tray id, "" = preset
         "orient",
         "walls",
         "infill",
@@ -1017,7 +1018,7 @@ def _selection(form: dict[str, str], panel: bool) -> Selection:
         raise BadRequest("No part selected", "Right-click a part in the parts list")
     if panel and req.part_id is None and not face:
         raise BadRequest("Select a part, or the face it should stand on")
-    printer, slot = _split_printer(form.get("printer", ""))
+    printer, slot = _printer_choice(form.get("printer", ""), form.get("filament", ""))
     extra = _parse_extra(form.get("extra", "")) if panel else []
     if extra and req.part_id is None:
         raise BadRequest("Select the parts to print")
@@ -1066,6 +1067,16 @@ def _split_printer(value: str) -> tuple[str, int | None]:
     """'X1C_01|2' → ('X1C_01', 2): a printer and a global tray id; 'X1C_01' → preset filament."""
     m = re.fullmatch(r"(.+)\|(\d{1,3})", value)
     return (m.group(1), int(m.group(2))) if m else (value, None)
+
+
+def _printer_choice(printer: str, filament: str) -> tuple[str, int | None]:
+    """The page's combined 'printer|tray' menu, or the panel's printer + filament menus."""
+    name, slot = _split_printer(printer)
+    if filament:
+        if slot is not None or not re.fullmatch(r"\d{1,3}", filament):
+            raise BadRequest("Invalid filament choice")
+        slot = int(filament)
+    return name, slot
 
 
 def _slot_usable(slot: Slot, dual: bool) -> bool:
@@ -1132,6 +1143,65 @@ def _printer_select(views: list[PrinterView], cfg: Config) -> str:
     )
 
 
+def _filament_choices(v: PrinterView) -> list[dict[str, Any]]:
+    """The panel's filament menu for one printer: the preset filament, then each slot."""
+    default = _split_printer(_default_choice(v))[1]
+    preset_label = v.presets.filament.split(" @")[0] if v.presets else ""
+    out: list[dict[str, Any]] = [
+        {"value": "", "label": f"Preset filament ({preset_label})", "default": default is None}
+    ]
+    for slot, preset in v.slots:
+        if not _slot_usable(slot, v.printer.nozzle_count > 1):
+            label, disabled = f"{slot.describe()} (nozzle unknown)", True
+        elif preset is None:
+            label, disabled = f"{slot.describe()} (no matching preset)", True
+        else:
+            label, disabled = slot.describe(), False
+        out.append(
+            {
+                "value": str(slot.tray_id),
+                "label": label,
+                "color": slot.color,
+                "disabled": disabled,
+                "default": slot.tray_id == default and not disabled,
+            }
+        )
+    return out
+
+
+def _panel_printer_selects(views: list[PrinterView], cfg: Config) -> str:
+    """Separate printer and filament menus; panel.js refills the filament menu per printer."""
+    usable = [v for v in views if v.presets is not None]
+    skipped = [v.printer.name for v in views if v.presets is None]
+    wanted = cfg.bambuddy.default_printer if cfg.bambuddy else ""
+    first = next((v for v in usable if v.printer.name == wanted), usable[0] if usable else None)
+    printers = "".join(
+        f'<option value="{_e(v.printer.name)}"{" selected" if v is first else ""}>'
+        f"{_e(f'{v.printer.name} ({v.printer.model}), {v.state}')}</option>"
+        for v in usable
+    )
+    choices = {v.printer.name: _filament_choices(v) for v in usable}
+    # Server-rendered options for the first printer, so the form is complete before JS runs.
+    filaments = "".join(
+        f'<option value="{_e(c["value"])}"'
+        + (f' data-color="{_e(c["color"])}"' if c.get("color") else "")
+        + (" disabled" if c.get("disabled") else "")
+        + (" selected" if c["default"] else "")
+        + f">{_e(c['label'])}</option>"
+        for c in (choices[first.printer.name] if first else [])
+    )
+    note = (
+        f'<p class="muted">No presets configured for: {_e(", ".join(skipped))}</p>'
+        if skipped
+        else ""
+    )
+    return (
+        f'<label>Printer <select name="printer" required>{printers}</select></label>'
+        f'<label>Filament <select name="filament" data-choices="{_e(json.dumps(choices))}">'
+        f"{filaments}</select></label>{note}"
+    )
+
+
 @functools.cache
 def static_version() -> str:
     """A hash of the static files, so a deploy busts browsers' day-long cache of them."""
@@ -1180,7 +1250,7 @@ Open BamBuddy</a></p>
 <div id="preview" class="preview">
 <p id="preview-note" class="muted">Select a part to preview it.</p></div>
 <form id="printform" method="post" action="/panel/print">{hidden}
-{_printer_select(views, cfg)}
+{_panel_printer_selects(views, cfg)}
 <div id="extras"></div>
 {_plate_select(cfg)}
 <label>Orientation <select name="orient">{orient}</select></label>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import re
 import threading
 import time
@@ -115,9 +116,11 @@ def test_full_print_flow(srv: Running) -> None:
 
 def test_token_is_single_use(srv: Running) -> None:
     _, form = srv.get_form()
-    assert srv.post({**form, **choices()}).status_code == 303
+    r = srv.post({**form, **choices()})
+    assert r.status_code == 303
     again = srv.post({**form, **choices()})
     assert again.status_code == 403 and "already used" in again.text
+    wait_job(srv, r.headers["Location"])
 
 
 def test_token_is_bound_to_the_part(srv: Running) -> None:
@@ -151,7 +154,9 @@ def test_bad_token_and_bad_fields(srv: Running) -> None:
     assert srv.post({**form, **choices(), "shell": "rm"}).status_code == 400
     assert srv.fake.queued == []
     # Validation errors don't burn the token: the same form still works.
-    assert srv.post({**form, **choices()}).status_code == 303
+    r = srv.post({**form, **choices()})
+    assert r.status_code == 303
+    wait_job(srv, r.headers["Location"])  # don't let the job outlive the test's log capture
 
 
 def test_get_needs_a_navigation(srv: Running) -> None:
@@ -446,6 +451,51 @@ def test_menu_posts_a_slot(srv: Running) -> None:
     assert srv.fake.slice_bodies[0]["filament_preset"]["id"] == "Generic PETG @BBL A1M"
 
 
+def test_panel_has_separate_printer_and_filament_menus(srv: Running) -> None:
+    r, _ = panel_form(srv)
+    assert '<label>Printer <select name="printer" required>' in r.text
+    assert '<option value="A1 Mini" selected>A1 Mini (A1 Mini), idle</option>' in r.text
+    assert "|" not in re.search(r'<select name="printer".*?</select>', r.text, re.S).group(0)
+    # Filament options for the default printer, its loaded spool preselected...
+    menu = re.search(r'<select name="filament" data-choices="([^"]*)">(.*?)</select>', r.text, re.S)
+    assert menu, r.text
+    assert '<option value="254" data-color="#000000" selected>External: PETG · black</option>' in (
+        menu.group(2)
+    )
+    assert '<option value="">Preset filament (Bambu PLA Basic)</option>' in menu.group(2)
+    # ...and every printer's choices for panel.js to switch to.
+    choices_json = json.loads(menu.group(1).replace("&quot;", '"').replace("&#x27;", "'"))
+    assert set(choices_json) == {"A1 Mini"}  # the only printer with presets in this config
+    assert [c["value"] for c in choices_json["A1 Mini"]] == ["", "254"]
+    assert [c["default"] for c in choices_json["A1 Mini"]] == [False, True]
+
+
+def test_panel_posts_printer_and_filament_separately(srv: Running) -> None:
+    _, form = panel_form(srv)
+    r = post_panel(srv, {**form, "p": "JHD", **choices(filament="254")})
+    assert r.status_code == 303, r.text
+    page = wait_job(srv, r.headers["Location"], headers=FRAME)
+    assert "External: PETG · black" in page.text
+    assert srv.fake.slice_bodies[0]["filament_preset"]["id"] == "Generic PETG @BBL A1M"
+
+
+@pytest.mark.parametrize(
+    "bad", [{"filament": "x"}, {"filament": "1234"}, {"printer": "A1 Mini|254", "filament": "254"}]
+)
+def test_panel_filament_refusals(srv: Running, bad: dict[str, str]) -> None:
+    _, form = panel_form(srv)
+    r = post_panel(srv, {**form, "p": "JHD", **choices(**bad)})
+    assert r.status_code == 400 and srv.fake.queued == []
+
+
+def test_panel_preset_filament_is_an_empty_choice(srv: Running) -> None:
+    _, form = panel_form(srv)
+    r = post_panel(srv, {**form, "p": "JHD", **choices(filament="")})
+    assert r.status_code == 303
+    wait_job(srv, r.headers["Location"], headers=FRAME)
+    assert srv.fake.slice_bodies[0]["filament_preset"]["id"] == "Bambu PLA Basic @BBL A1M"
+
+
 def test_plate_field(srv: Running) -> None:
     _, form = srv.get_form()
     assert srv.post({**form, **choices(plate="Glass")}).status_code == 400
@@ -491,7 +541,7 @@ def test_unchecked_box_beats_a_checked_default(cfg: Config) -> None:
 
 def test_panel_multi_material_post(srv: Running) -> None:
     _, form = panel_form(srv)
-    r = post_panel(srv, {**form, "p": "JHD", "extra": "JKD:254", **choices(printer="A1 Mini|254")})
+    r = post_panel(srv, {**form, "p": "JHD", "extra": "JKD:254", **choices(filament="254")})
     assert r.status_code == 303, r.text
     page = wait_job(srv, r.headers["Location"], headers=FRAME)
     assert "Queued ✓" in page.text and "2 parts, one object" in page.text
