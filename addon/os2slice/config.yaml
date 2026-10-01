@@ -35,6 +35,10 @@ options:
   infill: 15
   supports: "off"
   build_plate_only: false
+  top_layers: 5
+  bottom_layers: 3
+  brim: false
+  copies: 1
   default_plate: "High Temp Plate"  # smooth PEI (Bambu's name for it)
   web_studio_url: "https://print.example.duckdns.org:3443"  # the Bambu Studio (web) add-on; "" to hide
   presets:
@@ -70,6 +74,10 @@ schema:
   infill: int(0,100)
   supports: list(off|normal|tree)
   build_plate_only: bool
+  top_layers: int(0,30)?
+  bottom_layers: int(0,30)?
+  brim: bool?
+  copies: int(1,25)?
   default_plate: str?
   presets:
     - model: str

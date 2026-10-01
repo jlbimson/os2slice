@@ -248,7 +248,19 @@ def parse(data: dict[str, Any], path: Path) -> Config:
 
     pd = table("print_defaults")
     check_keys(
-        "print_defaults", pd, {"walls", "infill", "supports", "build_plate_only", "bed_type"}
+        "print_defaults",
+        pd,
+        {
+            "walls",
+            "infill",
+            "supports",
+            "build_plate_only",
+            "top_layers",
+            "bottom_layers",
+            "brim",
+            "copies",
+            "bed_type",
+        },
     )
     try:
         print_defaults = PrintSettings(**{k: pd[k] for k in pd if k != "bed_type"})

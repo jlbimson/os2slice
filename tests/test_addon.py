@@ -20,6 +20,8 @@ OPTS = {
     "infill": 20,
     "supports": "tree",
     "build_plate_only": False,
+    "brim": True,
+    "copies": 2,
     "presets": [
         {
             "model": "A1 Mini",
@@ -48,6 +50,8 @@ def test_prepare_renders_a_valid_lan_config(
     assert cfg.bambuddy is not None and cfg.bambuddy.base_url == "http://172.30.32.1:8000"
     assert cfg.bambuddy.presets['Odd "model"'].printer == "p\\x"
     assert (cfg.print_defaults.walls, cfg.print_defaults.supports) == (3, "tree")
+    d = cfg.print_defaults
+    assert (d.brim, d.copies, d.top_layers, d.bottom_layers) == (True, 2, 5, 3)  # unset: defaults
     assert os.environ["XDG_CONFIG_HOME"] == str(tmp_path)
     assert auth.load_keys().access == "acc"  # from the environment, not a file
     assert "acc" not in path.read_text() and "bb_x" not in path.read_text()

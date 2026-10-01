@@ -100,6 +100,10 @@ def render_config(opts: dict[str, Any], ssl_dir: Path = SSL) -> str:
         f"infill = {int(opts.get('infill', 15))}",
         f"supports = {s(opts.get('supports', 'off'))}",
         f"build_plate_only = {'true' if opts.get('build_plate_only') else 'false'}",
+        f"top_layers = {int(opts.get('top_layers', 5))}",
+        f"bottom_layers = {int(opts.get('bottom_layers', 3))}",
+        f"brim = {'true' if opts.get('brim') else 'false'}",
+        f"copies = {int(opts.get('copies', 1))}",
         *([f"bed_type = {s(opts['default_plate'])}"] if opts.get("default_plate") else []),
         "",
     ]

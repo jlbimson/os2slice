@@ -86,6 +86,12 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--infill", help="sparse infill percent (0-100)")
     pr.add_argument("--supports", choices=SUPPORTS)
     pr.add_argument("--build-plate-only", action="store_true", help="supports from the plate only")
+    pr.add_argument("--top-layers", help="solid top layers (0-30)")
+    pr.add_argument("--bottom-layers", help="solid bottom layers (0-30)")
+    pr.add_argument(
+        "--brim", action=argparse.BooleanOptionalAction, help="outer brim (default: config)"
+    )
+    pr.add_argument("--copies", help="copies of the part(s) on one plate (1-25)")
     pr.add_argument(
         "--slice-only", action="store_true", help="upload and slice, but don't queue a print"
     )
@@ -169,6 +175,10 @@ def cmd_print(args: argparse.Namespace) -> int:
                 "infill": args.infill,
                 "supports": args.supports,
                 "build_plate_only": "true" if args.build_plate_only else None,
+                "top_layers": args.top_layers,
+                "bottom_layers": args.bottom_layers,
+                "brim": None if args.brim is None else str(args.brim).lower(),
+                "copies": args.copies,
             }.items()
             if v is not None
         },

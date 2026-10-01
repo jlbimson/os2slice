@@ -15,8 +15,9 @@ from os2slice.auth import Keys
 from os2slice.bambuddy import BambuddyClient
 from os2slice.config import Config, ServerConfig
 from os2slice.onshape import OnshapeClient
+from os2slice.settings import PrintSettings
 from tests.conftest import DOC, ELEM, QUERY_WITH_CONFIG, WS
-from tests.fakes import FakeBambuddy, fake_onshape
+from tests.fakes import FakeBambuddy, fake_onshape, uploaded_zip
 
 HOST = "localhost:8765"
 NAV = {
@@ -450,6 +451,37 @@ def test_plate_field(srv: Running) -> None:
     assert r.status_code == 303
     wait_job(srv, r.headers["Location"])
     assert srv.fake.slice_bodies[0]["bed_type"] == "Textured PEI Plate"
+
+
+def test_brim_shells_and_copies_fields(srv: Running) -> None:
+    r, form = srv.get_form()
+    for name in ("top_layers", "bottom_layers", "copies", "brim"):
+        assert f'name="{name}"' in r.text
+    for bad in ({"copies": "0"}, {"copies": "26"}, {"top_layers": "x"}, {"brim": "outer"}):
+        assert srv.post({**form, **choices(**bad)}).status_code == 400
+    extra = {"brim": "true", "top_layers": "6", "bottom_layers": "4", "copies": "2"}
+    r = srv.post({**form, **choices(**extra)})
+    assert r.status_code == 303
+    wait_job(srv, r.headers["Location"])
+    o = srv.fake.slice_bodies[0]["process_overrides"]
+    assert (o["brim_type"], o["top_shell_layers"], o["bottom_shell_layers"]) == ("outer_only", 6, 4)
+    assert uploaded_zip(srv.fake).read("3D/3dmodel.model").decode().count("<item ") == 2
+
+
+def test_unchecked_box_beats_a_checked_default(cfg: Config) -> None:
+    cfg = dataclasses.replace(
+        cfg, print_defaults=PrintSettings(brim=True, supports="tree", build_plate_only=True)
+    )
+    run = Running(cfg, FakeBambuddy(job_states=["completed"]))
+    try:
+        r, form = run.get_form()
+        assert 'name="brim" value="true" checked' in r.text
+        r = run.post({**form, **choices()})  # both boxes unticked: not in the form at all
+        wait_job(run, r.headers["Location"])
+        o = run.fake.slice_bodies[0]["process_overrides"]
+        assert o["brim_type"] == "no_brim" and o["support_on_build_plate_only"] == 0
+    finally:
+        run.httpd.shutdown()
 
 
 # -- multi-material in the panel -------------------------------------------------
