@@ -44,6 +44,7 @@ from os2slice.modules.base import (
     Health,
     Material,
     Media,
+    ModuleAuthError,
     ModuleError,
     ModuleSpec,
     PartGeometry,
@@ -153,8 +154,10 @@ class SlicerApi:
         timeout_s: float = 900,
         api_key: str = "",
         *,
+        key: str = "",
         transport: httpx.BaseTransport | None = None,
     ) -> None:
+        self.key = key or self.spec.kind  # its [slicers.<key>] name, for error messages
         parts = urlsplit(url.strip())
         if parts.scheme not in ("http", "https") or not parts.hostname:
             raise ModuleError(f"{self.spec.label}: {url[:80]!r} isn't an http(s) URL")
@@ -171,13 +174,18 @@ class SlicerApi:
 
     @classmethod
     def from_values(
-        cls, values: Mapping[str, Any], *, transport: httpx.BaseTransport | None = None
+        cls,
+        values: Mapping[str, Any],
+        *,
+        key: str = "",
+        transport: httpx.BaseTransport | None = None,
     ) -> SlicerApi:
         """The registry factory: validated field values (secret already resolved)."""
         return cls(
             str(values["url"]),
             values.get("timeout_s") or 900,
             str(values.get("api_key") or ""),
+            key=key,
             transport=transport,
         )
 
@@ -217,7 +225,7 @@ class SlicerApi:
 
     def _json(self, resp: httpx.Response, what: str) -> Any:
         if resp.status_code >= 400:
-            raise _refused(resp, what)
+            raise _refused(resp, what, self.key)
         try:
             return resp.json()
         except ValueError as e:
@@ -252,18 +260,25 @@ class SlicerApi:
         checks = body.get("checks") if isinstance(body.get("checks"), dict) else {}
         slicer = checks.get("orcaslicer") if isinstance(checks.get("orcaslicer"), dict) else {}
         version = str(slicer.get("version") or "")
-        problems = [
-            f"{name}: {c.get('error')}"
+        failing = {
+            name: str(c.get("error"))
             for name, c in checks.items()
             if isinstance(c, dict) and c.get("error")
-        ]
+        }
         ok = resp.status_code == 200 and body.get("status") == "healthy"
+        detail = ""
+        if not ok and slicer.get("available") and set(failing) == {"dataPath"}:
+            # The resolver flavour reports itself unhealthy without a writable DATA_PATH,
+            # which only its stored user profiles need; os2slice uploads its profiles, so
+            # slicing works (docs/SLICERAPI_API.md). Pass, with a warning.
+            ok = True
+            detail = f"dataPath: {failing.pop('dataPath')[:200]} (harmless: profiles are uploaded)"
         summary = f"{self.spec.label} {'healthy' if ok else 'unhealthy'}"
         if version and version != "unknown":
             summary += f", slicer {version}"
-        if problems:
-            summary += f" ({'; '.join(problems)[:200]})"
-        return Health(ok, summary, version, json.dumps(body)[:1000])
+        if failing:
+            summary += f" ({'; '.join(f'{k}: {v}' for k, v in failing.items())[:200]})"
+        return Health(ok, summary, version, detail)
 
     def profiles(self, printer_model: str = "") -> ProfileCatalog:
         if self.flavour() == "resolver":
@@ -438,7 +453,7 @@ class SlicerApi:
                     f"Couldn't download the sliced file: {e or type(e).__name__}"
                 ) from e
         if result.status_code >= 400:
-            raise _refused(result, "sliced file")
+            raise _refused(result, "sliced file", self.key)
         with contextlib.suppress(httpx.RequestError):
             self._client.delete(f"/slice-async/{rid}")  # tidy the sidecar; best effort
         stats = _Stats(
@@ -489,7 +504,7 @@ class SlicerApi:
             raise ModuleError(f"Slicing request failed: {error}") from error
         resp: httpx.Response = box["resp"]
         if resp.status_code >= 400:
-            raise _refused(resp, "slice request")
+            raise _refused(resp, "slice request", self.key)
         stats = _Stats(
             _pos_int(resp.headers.get("x-print-time-seconds")),
             _pos_float(resp.headers.get("x-filament-used-g")),
@@ -711,8 +726,15 @@ def _norm(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", text.lower())
 
 
-def _refused(resp: httpx.Response, what: str) -> ModuleError:
+def _refused(resp: httpx.Response, what: str, key: str = "") -> ModuleError:
     """The sidecar's own reason: `{"message", "details"?}` (details = the CLI's stderr)."""
+    if resp.status_code in (401, 403):
+        # The sidecar has no auth; this is a reverse proxy in front of it.
+        return ModuleAuthError(
+            f"The slicer refused the {what} (HTTP {resp.status_code})",
+            f"Check the API key for [slicers.{key}] (secret slicers.{key}.api_key) "
+            "that the proxy in front of the sidecar wants",
+        )
     try:
         body = resp.json()
     except ValueError:

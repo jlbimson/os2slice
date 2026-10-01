@@ -33,6 +33,17 @@ class ModuleError(Os2sliceError):
     http_status = 502
 
 
+class ModuleAuthError(ModuleError):
+    """The module's service refused its credentials (HTTP 401/403).
+
+    Still a 502 for the browser (the fault is upstream), but the core can tell it apart
+    and word the fix as "check the key for [targets.<key>]" / "[slicers.<key>]".
+    Exit code 3 in the CLI, like the other key problems.
+    """
+
+    exit_code = 3
+
+
 # ---------------------------------------------------------------------------
 # Config schema: what each module kind needs, so the config page can render a form
 # and config.py can validate without knowing the module.
@@ -165,7 +176,12 @@ class SliceInput:
     auto_arrange: bool = False
     bed_type: str | None = None  # Bambu plate name, when the module understands it
     media: Media | None = None  # what the target accepts; None = the slicer's default
-    extra: Mapping[str, Any] = field(default_factory=dict)
+    # Extra slicer process keys the core adds on top of `settings` (Bambu Studio /
+    # OrcaSlicer key names, string values: "wipe_tower_x", later "layer_height"…).
+    # Slicer modules apply them after `settings.process_overrides()`; a prime tower spot
+    # a module picks itself (bambu_project.with_tower_retries) goes on top of these.
+    process_overrides: Mapping[str, Any] = field(default_factory=dict)
+    extra: Mapping[str, Any] = field(default_factory=dict)  # module-specific (document…)
 
 
 @dataclass(frozen=True)
@@ -196,7 +212,7 @@ class Health:
     ok: bool
     summary: str  # one line for `doctor` and the config page
     version: str = ""
-    detail: str = ""
+    detail: str = ""  # a further line worth a warning (doctor shows it as WARN); else ""
 
 
 @dataclass(frozen=True)
@@ -210,6 +226,12 @@ class ProfileCatalog:
 # The protocols. A module class carries `spec` and is built by its factory from
 # the validated field values (secrets already resolved) plus an httpx transport
 # override for tests.
+#
+# Errors: raise ModuleError with the service's own reason, ModuleAuthError when the
+# service refuses the credentials (401/403), ConfigError for a bad configured value.
+#
+# Optional on both: `close() -> None`, releasing pooled connections. `Modules.close()`
+# calls it on every module that has it; a module without it holds nothing open.
 
 
 @runtime_checkable
@@ -242,7 +264,13 @@ class Target(Protocol):
         """
         ...
 
-    def status(self, printer: PrinterInfo) -> PrinterStatus: ...
+    def status(self, printer: PrinterInfo) -> PrinterStatus:
+        """The printer's state now. Offline convention: when the printer (or the service
+        in front of it) can't be reached or doesn't answer, return
+        `PrinterStatus(state="offline", connected=False, ready=False, detail=<why>)`
+        rather than raising, so a printer menu still renders. Raise only for config and
+        auth problems (ConfigError, ModuleAuthError), which a person must fix."""
+        ...
 
     def submit(
         self,
@@ -267,9 +295,10 @@ def distinct_materials(parts: tuple[PartGeometry, ...]) -> tuple[Material, ...]:
     return tuple(seen.values())
 
 
-# factory(values: Mapping[str, Any], *, key: str, transport=None) -> module. `values` are
-# the validated config fields with secrets resolved (None when unset), plus "models"
-# for targets; `key` (passed only to constructors that take it) is the module's
+# factory(values: Mapping[str, Any], *, key: str, transport=None) -> module: the class's
+# `from_values` classmethod when it has one, else the class itself. `values` are the
+# validated config fields with secrets resolved (None when unset), plus "models" for
+# targets; `key` (passed only to factories that take it) is the module's
 # [slicers.<key>] / [targets.<key>] name.
 #
 # Optional on a target: `ui_url`, a method `(request_host: str = "") -> str` or a plain

@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from os2slice.errors import ConfigError
-from os2slice.modules.base import ModuleError, PrinterInfo, SliceOutput, Target
+from os2slice.modules.base import ModuleAuthError, ModuleError, PrinterInfo, SliceOutput, Target
 from os2slice.modules.prusalink import SPEC, PrusaLink, file_name
 from tests.fakes_printers import PRUSALINK_URL, FakePrusaLink
 
@@ -181,7 +181,8 @@ def test_unauthorized_is_module_error() -> None:
     fake = FakePrusaLink()
     with pytest.raises(ModuleError, match="refused the API key: Unauthorized") as e:
         make(fake, api_key="wrong").submit(PRINTER, BGCODE, start=False)
-    assert "API key" in e.value.fix
+    assert "API key" in e.value.fix and isinstance(e.value, ModuleAuthError)
+    assert "[targets.prusalink]" in e.value.fix
     assert fake.existing == set()
 
 

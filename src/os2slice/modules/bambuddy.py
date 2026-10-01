@@ -35,6 +35,7 @@ from os2slice.modules.base import (
     Health,
     Material,
     ModelDefaults,
+    ModuleAuthError,
     ModuleError,
     ModuleSpec,
     PrinterInfo,
@@ -306,10 +307,16 @@ class BambuddyModule:
     def status(self, printer: PrinterInfo) -> PrinterStatus:
         dual = printer.nozzle_count > 1
         suffix = preset_suffix(printer.profiles.filament)
-        with self.client() as bb:
-            raw = bb.printer_status(int(printer.extra["printer_id"]))
-            slots = slots_from_status(raw, dual)
-            names = self._filament_names(bb) if slots and suffix else []
+        try:
+            with self.client() as bb:
+                raw = bb.printer_status(int(printer.extra["printer_id"]))
+                slots = slots_from_status(raw, dual)
+                names = self._filament_names(bb) if slots and suffix else []
+        except ModuleAuthError:
+            raise
+        except ModuleError as e:  # BamBuddy down or refusing: the printer is offline to us
+            log.warning("bambuddy %s: no status for %s: %s", self.url, printer.name, e.message)
+            return PrinterStatus("offline", False, False, e.message)
         materials = tuple(
             Material(
                 id=str(s.tray_id),

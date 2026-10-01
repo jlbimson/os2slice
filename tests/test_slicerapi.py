@@ -20,6 +20,7 @@ import pytest
 
 from os2slice.modules.base import (
     Material,
+    ModuleAuthError,
     ModuleError,
     PartGeometry,
     PrinterInfo,
@@ -36,7 +37,16 @@ from os2slice.modules.slicerapi import (
 )
 from os2slice.orientation import bounding_box
 from os2slice.settings import PrintSettings
-from tests.fakes_slicerapi import A1M, AFK_NAMES, REQUEST_ID, FakeSidecar, box_stl, gcode, gcode_3mf
+from tests.fakes_slicerapi import (
+    A1M,
+    AFK_NAMES,
+    REQUEST_ID,
+    RESOLVER_HEALTH,
+    FakeSidecar,
+    box_stl,
+    gcode,
+    gcode_3mf,
+)
 
 URL = "http://172.30.32.1:3001"
 PROFILES = Profiles(A1M, "0.20mm Standard @BBL A1M", "Bambu PLA Basic @BBL A1M")
@@ -114,6 +124,13 @@ def test_api_key_sent_only_when_set() -> None:
     assert fake.requests[-1].headers["authorization"] == "Bearer s3cret"
 
 
+def test_a_proxy_refusing_the_key_is_an_auth_error() -> None:
+    fake = FakeSidecar(slice_error=(401, {"message": "Unauthorized"}))
+    with pytest.raises(ModuleAuthError, match="HTTP 401") as e:
+        api(fake).slice(job(), Log())
+    assert "[slicers.bambu-studio-api]" in e.value.fix
+
+
 # -- check -------------------------------------------------------------------------------
 
 
@@ -124,9 +141,15 @@ def test_check_healthy() -> None:
 
 
 def test_check_unhealthy_says_why() -> None:
-    health = api(FakeSidecar("resolver")).check()
-    assert not health.ok
-    assert "dataPath" in health.summary and "/app/data" in health.summary
+    body = {**RESOLVER_HEALTH, "checks": {"orcaslicer": {"available": False, "error": "gone"}}}
+    health = api(FakeSidecar("resolver", health=(503, body))).check()
+    assert not health.ok and "orcaslicer: gone" in health.summary and not health.detail
+
+
+def test_check_resolver_without_data_path_passes_with_a_warning() -> None:
+    health = api(FakeSidecar("resolver")).check()  # the add-on's real answer: 503 unhealthy
+    assert health.ok and health.summary == "Bambu Studio API sidecar healthy"
+    assert "dataPath" in health.detail and "/app/data" in health.detail
 
 
 def test_check_not_json_or_unreachable() -> None:
