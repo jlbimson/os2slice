@@ -1,6 +1,6 @@
 # Onshape setup
 
-os2slice appears in Onshape through an OAuth application with two extensions. Replace `<host>` below with the add-on's `hosts` value, e.g. `print.example.duckdns.org:8443`.
+os2slice appears in Onshape through an OAuth application with two extensions. Replace `<host>` below with os2slice's `hosts` setting, e.g. `print.example.duckdns.org:8443`.
 
 ## 1. OAuth application
 
@@ -17,11 +17,10 @@ Onshape → account menu → **My account** → **Developer** → **OAuth applic
 
 Copy the **client secret** from the window shown right after creation: Onshape shows it only once. If you lose it, regenerate it on the app's **Keys and secret** tab, which also shows the client ID.
 
-In the os2slice add-on's Configuration tab:
+Put them in os2slice's settings:
 
-1. Set `onshape_auth: oauth`.
-2. Set `onshape_oauth_client_id` and `onshape_oauth_client_secret`.
-3. Save and restart.
+- **Docker Compose:** in `docker/config.toml`, set `[onshape] auth = "oauth"` and `oauth_client_id`. Put the secret in `.env` as `ONSHAPE_OAUTH_CLIENT_SECRET`. Then run `docker compose up -d`.
+- **Home Assistant:** in the add-on's Configuration tab, set `onshape_auth: oauth`, `onshape_oauth_client_id` and `onshape_oauth_client_secret`. Then save and restart.
 
 The log's pass/fail table should show `Onshape sign-in: per user; redirect URI https://<host>/auth/callback`.
 

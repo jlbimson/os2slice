@@ -326,7 +326,9 @@ def _setup_bambuddy_key(from_env: bool) -> int:
 # -- doctor -------------------------------------------------------------------
 
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
-ADDON = os.environ.get("OS2SLICE_ADDON") == "1"  # set by the Home Assistant add-on
+ADDON = (
+    os.environ.get("OS2SLICE_ADDON") == "1"
+)  # set by the Home Assistant add-on and the Docker image
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -383,7 +385,11 @@ def _check_keys(
     try:
         keys = auth.load_keys()
         if keys.source == "keyring" or ADDON:
-            add(PASS, "API keys", f"from the {'add-on options' if ADDON else 'system keyring'}")
+            add(
+                PASS,
+                "API keys",
+                f"from the {'add-on/container settings' if ADDON else 'system keyring'}",
+            )
         else:
             add(WARN, "API keys", f"from ${auth.ENV_ACCESS}; run `os2slice setup-keys`")
     except Os2sliceError as e:
@@ -406,7 +412,7 @@ def _check_bambuddy(
     try:
         key, source = auth.load_bambuddy_key()
         status = PASS if source == "keyring" or ADDON else WARN
-        add(status, "BamBuddy key", f"from the {'add-on options' if ADDON else source}")
+        add(status, "BamBuddy key", f"from the {'add-on/container settings' if ADDON else source}")
     except Os2sliceError as e:
         add(FAIL, "BamBuddy key", e.one_line())
         return

@@ -23,3 +23,7 @@ result.json
 # working notes kept out of the public repo
 CLAUDE.md
 docs/PLAN.md
+
+# Docker Compose: local settings, secrets and certificates
+/docker/config.toml
+/certs/

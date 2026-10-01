@@ -1,0 +1,50 @@
+# os2slice settings for Docker Compose. Copy to docker/config.toml and edit.
+# Secrets don't go here: they come from .env (docker/env.example).
+
+[onshape]
+auth = "oauth"                       # each user signs in with Onshape ("keys": one API key pair)
+oauth_client_id = "YOUR-CLIENT-ID"   # the OAuth app's Keys and secret tab
+
+[server]
+identity = "lan"                     # anyone on the LAN may use it; HTTPS required
+bind = "0.0.0.0"
+port = 8443
+hosts = ["print.example.duckdns.org:8443"]   # the name browsers use; the first forms the sign-in redirect URL
+tls_cert = "/certs/fullchain.pem"
+tls_key = "/certs/privkey.pem"
+
+[bambuddy]
+base_url = "http://host.docker.internal:8000"   # BamBuddy on the Docker host
+folder = "Onshape"                   # library folder for uploads
+default_printer = ""                 # BamBuddy printer name preselected in the panel
+manual_start = true                  # queued jobs wait for Start in BamBuddy
+# public_url = "http://print.example.duckdns.org:8000"   # BamBuddy as browsers reach it
+
+# Slicer presets per BamBuddy printer model.
+[bambuddy.presets."A1 Mini"]
+printer = "Bambu Lab A1 mini 0.4 nozzle"
+process = "0.20mm Standard @BBL A1M"
+filament = "Bambu PLA Basic @BBL A1M"
+
+[bambuddy.presets."X1C"]
+printer = "Bambu Lab X1 Carbon 0.4 nozzle"
+process = "0.20mm Standard @BBL X1C"
+filament = "Bambu PLA Basic @BBL X1C"
+
+[bambuddy.presets."H2D"]
+printer = "Bambu Lab H2D 0.4 nozzle"
+process = "0.20mm Standard @BBL H2D"
+filament = "Bambu PLA Basic @BBL H2D"
+
+# The web Bambu Studio (`web-studio` profile); delete this table if you don't run it.
+[web_studio]
+url = "https://print.example.duckdns.org:3443"
+inbox = "/share/os2slice/inbox"
+status = "/share/os2slice/web-studio.json"
+
+[print_defaults]
+walls = 2
+infill = 15
+supports = "off"
+build_plate_only = false
+bed_type = "High Temp Plate"         # Bambu's name for smooth PEI

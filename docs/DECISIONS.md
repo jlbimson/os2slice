@@ -73,3 +73,17 @@ default and the CLI keeps using keys.
 - **To verify live (Phase 8):** the token exchange's exact shape, `expires_in`, and that
   `sessioninfo` returns `name` for OAuth tokens (it's null for API keys).
 
+
+## D-24: Docker Compose as a first-class deployment (2026-10-01)
+
+Home Assistant is optional. `docker-compose.yml` runs the same two images on any Linux
+Docker host: `os2slice` (root `Dockerfile`, non-root uid 1000, config from a mounted
+`docker/config.toml`, secrets from `.env`) and, under the `web-studio` profile, the
+unchanged `addon/bambustudio_web` image. BamBuddy stays outside (its own install, host
+networking) and is reached as `host.docker.internal`. A `duckdns` profile replaces Home
+Assistant's Duck DNS add-on: lego (DNS-01 via Duck DNS) keeps `./certs` current and sets the
+A record to the LAN address. The web container needs `apparmor:unconfined` for the same
+reason as on HAOS (D-21). The two containers share a `shared` volume for the inbox and
+status file; the inbox belongs to uid 1000 (os2slice and the image's `abc` user). Tested
+locally 2026-10-01: doctor all PASS against the real BamBuddy, sign-in redirect, web
+session status, and a cross-container handoff; the `duckdns` script dry-run with stubs.

@@ -1,0 +1,69 @@
+# os2slice with Docker Compose, no Home Assistant needed. See docs/DOCKER.md.
+#
+#   cp docker/config.example.toml docker/config.toml   # then edit it
+#   cp docker/env.example .env && chmod 600 .env       # then fill in the secrets
+#   docker compose up -d --build                       # os2slice only
+#   docker compose --profile web-studio --profile duckdns up -d --build   # everything
+#
+# BamBuddy runs separately (its own compose file, host networking); these services reach
+# it on the Docker host as host.docker.internal.
+
+services:
+  os2slice:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+    env_file: .env  # ONSHAPE_OAUTH_CLIENT_SECRET, BAMBUDDY_API_KEY, ...
+    volumes:
+      - ./docker/config.toml:/data/os2slice/config.toml:ro
+      - ./certs:/certs:ro
+      - os2slice-data:/data/state  # sign-ins, log
+      - shared:/share/os2slice  # hands parts to the web Bambu Studio
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Bambu Studio in a browser tab, one shared session (optional).
+  bambustudio-web:
+    profiles: ["web-studio"]
+    build: addon/bambustudio_web
+    restart: unless-stopped
+    ports:
+      - "3443:3001"
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: ${TZ:-Etc/UTC}
+      CUSTOM_USER: bambu
+      PASSWORD: ${WEB_STUDIO_PASSWORD:-}  # optional basic auth
+      BAMBUDDY_URL: ${BAMBUDDY_URL:-http://host.docker.internal:8000}
+    shm_size: "1gb"
+    security_opt:
+      # Docker's default AppArmor profile makes Bambu Studio abort at start.
+      - apparmor:unconfined
+      - seccomp:unconfined
+    volumes:
+      - bambustudio-config:/config  # Bambu Studio settings, presets, logins
+      - ./certs:/ssl:ro
+      - shared:/share/os2slice
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Points <name>.duckdns.org at this machine's LAN address and keeps the HTTPS
+  # certificate in ./certs (optional; skip it if you bring your own certificate).
+  duckdns:
+    profiles: ["duckdns"]
+    image: goacme/lego:v5.5.2
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/duckdns-certs.sh"]
+    env_file: .env  # DUCKDNS_DOMAIN, DUCKDNS_TOKEN, LAN_IP, ACME_EMAIL
+    volumes:
+      - ./docker/duckdns-certs.sh:/duckdns-certs.sh:ro
+      - ./certs:/certs
+      - lego-data:/data
+
+volumes:
+  os2slice-data:
+  bambustudio-config:
+  shared:
+  lego-data:
