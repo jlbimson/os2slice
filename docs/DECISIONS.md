@@ -98,3 +98,32 @@ session status, and a cross-container handoff; the `duckdns` script dry-run with
 ## D-26: Separate printer and filament menus in the panel (2026-10-01, Josh)
 
 The panel has a **Printer** menu (printer names) and a **Filament** menu (the preset filament, value `""`, then that printer's loaded slots, value = global tray id). The server sends every printer's filament choices as JSON (`data-choices`) and renders the default printer's options itself; `panel.js` refills the menu when the printer changes, keeping the preset choice across printers and otherwise taking that printer's default (D-19's rule). The extra parts' menus (D-20) list the chosen printer's slots from it. The form gains a `filament` field; `printer` may still be the combined `name|tray` value, which the **right-click page keeps**, because that page runs no JavaScript (CSP without `script-src`) and so can't make one menu follow the other. Sending a tray in both fields is refused.
+
+## D-27: Slicer and target modules (2026-10-01, Josh)
+
+os2slice becomes a general CAD → print broker rather than a BamBuddy front end. Two
+kinds of pluggable module, bound per printer in config: **slicers** (geometry + settings
+→ print file) and **targets** (print file → printer or farm queue). BamBuddy is wrapped
+as one of each, so today's path keeps working while slicing moves to the Bambu Studio /
+OrcaSlicer sidecars called directly, and Moonraker, PrusaLink and PreFormServer join as
+targets. Contract: `src/os2slice/modules/base.py`; design: `docs/MODULES.md`. Rules kept
+from before: a target's `submit(start=False)` must leave the job waiting for a person
+(D-13); modules call only their configured URL; secrets live in the secret store under
+`<section>.<name>.<key>`, never in config.toml. Each module declares its config fields
+(`ModuleSpec`), which is what the web config page (D-28) renders. Priority: FDM first,
+SLA (issue #2) after. Development on Josh's desktop only; nothing is deployed to
+barnassistant until he says so.
+
+## D-28: Web config page (2026-10-01, Josh)
+
+A config page in the service (`/admin`) for slicer and printer connections, Onshape
+and server settings, print defaults, secrets, `doctor`, jobs and the log. It is the
+most sensitive page the service has and the service is open to the LAN (D-17), so:
+it needs an **admin password** (scrypt hash in the state dir, set with
+`os2slice admin-password` or the add-on option; no browser-based bootstrap, so a fresh
+install can't be claimed from the LAN), its own session cookie (`Secure; HttpOnly;
+SameSite=Strict`, 12 h), the same CSRF and same-origin rules as Print, login
+rate-limiting, and secrets that are write-only. Config writes are atomic
+(`config.toml.tmp` → rename) through a small TOML emitter for our own schema (no new
+dependency), the service reloads its config after a save, and settings that need a
+restart (bind, port, TLS) say so on the page.
