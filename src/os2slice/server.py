@@ -1168,9 +1168,11 @@ def _panel_body(
     manual = cfg.bambuddy is not None and cfg.bambuddy.manual_start
     start = "Waits in BamBuddy until you press Start." if manual else ""
     beds = {v.printer.name: BED_MM.get(v.printer.model, (256, 256)) for v in views}
+    # The preview lays copies out like printing.copy_offsets, with the same spacing.
+    layout = {"gap": printing.COPY_GAP, "brimGap": printing.BRIM_GAP, "margin": printing.BED_MARGIN}
     return f"""<div id="panel" data-onshape="{_e(cfg.onshape_base_url)}"
  data-ids="{_e(json.dumps(ids))}" data-parts="{_e(json.dumps(parts))}"
- data-beds="{_e(json.dumps(beds))}">
+ data-beds="{_e(json.dumps(beds))}" data-layout="{_e(json.dumps(layout))}">
 <p id="selection" class="sel">Loading…</p>
 {_studio_links(cfg)}
 <p class="links"><a href="{_e(bambuddy_ui)}/queue" target="_blank" rel="noopener">

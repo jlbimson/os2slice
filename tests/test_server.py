@@ -284,6 +284,8 @@ def test_panel_page(srv: Running) -> None:
     assert "frame-ancestors https://cad.onshape.com" in csp and "script-src 'self'" in csp
     assert 'data-onshape="https://cad.onshape.com"' in r.text
     assert "&quot;JHD&quot;: &quot;Part 1&quot;" in r.text  # part names for the selection text
+    # The preview lays out copies with the print's own spacing (printing.copy_offsets).
+    assert 'data-layout="{&quot;gap&quot;: 6.0, &quot;brimGap&quot;: 10.0' in r.text
     assert fields["p"] == "" and fields["face"] == "" and fields["csrf"]
     assert all(req.method == "GET" for req in srv.fake.requests)
     js = srv.http.get("/static/panel.js", headers={"Host": HOST})
