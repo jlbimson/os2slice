@@ -4,8 +4,10 @@ What `src/os2slice/modules/slicerapi.py` (kinds `orca-slicer-api`, `bambu-studio
 
 Marks: **✅ verified** = called on 2026-10-01 against the sidecars running locally in
 Docker on Josh's desktop (loopback only, never barnassistant); **📖 source** = read from the
-upstream repository and not exercised. Nothing here has been run against the HA add-on on
-barnassistant yet.
+upstream repository and not exercised. The table rows were verified locally; since
+2026-10-01 the `bambu-studio-api` module also runs against the "Bambu Studio API" HA
+add-on on barnassistant (port 3001, added as a slicer on `/admin`), and Josh reports it
+working there. Individual rows have not been re-checked against that add-on.
 
 ## Upstreams
 
