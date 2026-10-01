@@ -669,3 +669,32 @@ def test_cli_admin_password_and_doctor_note(monkeypatch: pytest.MonkeyPatch) -> 
     assert AdminStore(adminauth.admin_path()).verify(PASSWORD)
     cli.check_admin_password(lambda s, c, d: rows.append((s, c, d)))
     assert rows[-1][0] == cli.PASS
+
+
+def test_reload_closes_the_replaced_modules_unless_a_job_runs(adm: Admin) -> None:
+    closed: list[str] = []
+
+    class Closeable:
+        spec = GcodeSlicer.spec
+
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def close(self) -> None:
+            closed.append(self.name)
+
+    adm.svc.modules = registry.Modules(slicers={"a": Closeable("a")})
+    adm.svc.reload()
+    assert closed == ["a"] and "farm" in adm.svc.modules.targets
+
+    release = threading.Event()
+
+    def work(progress: Callable[[str], None]) -> list[str]:
+        release.wait(2)
+        return []
+
+    adm.svc.jobs.start("u", "busy", work)
+    adm.svc.modules = registry.Modules(slicers={"b": Closeable("b")})
+    adm.svc.reload()
+    release.set()
+    assert closed == ["a"]  # a job may still use them; left for the collector

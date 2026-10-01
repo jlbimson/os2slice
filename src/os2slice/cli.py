@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from os2slice import __version__, auth, config, notify, pipeline, printing
 from os2slice.bambuddy import BambuddyClient
@@ -27,6 +28,9 @@ from os2slice.request import (
 )
 from os2slice.settings import SUPPORTS, PrintSettings
 from os2slice.slicers import flatpak_app_id, resolve_executable
+
+if TYPE_CHECKING:
+    from os2slice import server
 
 log = logging.getLogger("os2slice")
 
@@ -192,8 +196,10 @@ def cmd_print(args: argparse.Namespace) -> int:
         },
         cfg.print_defaults,
     )
-    modules = registry.Modules.from_config(cfg)
-    with OnshapeClient(cfg.onshape_base_url, auth.load_keys()) as onshape:
+    with (
+        registry.Modules.from_config(cfg) as modules,
+        OnshapeClient(cfg.onshape_base_url, auth.load_keys()) as onshape,
+    ):
         wanted = args.part or [None]
         slots = args.slot or []
         if len(wanted) > 1 and len(slots) != len(wanted):
@@ -237,6 +243,18 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if not cfg.targets:
         raise config.ConfigError("No printers are configured", f"Add [targets.*] to {cfg.path}")
     modules = registry.Modules.from_config(cfg)
+    try:
+        service = _make_service(cfg, modules)
+    except BaseException:
+        modules.close()
+        raise
+    server.serve(service)  # closes the service's modules when it stops
+    return 0
+
+
+def _make_service(cfg: config.Config, modules: registry.Modules) -> server.Service:
+    from os2slice import server
+
     signin = None
     if cfg.onshape_auth == "oauth":
         # Each user signs in (D-23); the shared API keys aren't used by the service.
@@ -259,9 +277,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         def onshape() -> OnshapeClient:
             return OnshapeClient(cfg.onshape_base_url, keys)
 
-    service = server.Service(cfg, onshape=onshape, modules=modules, signin=signin)
-    server.serve(service)
-    return 0
+    return server.Service(cfg, onshape=onshape, modules=modules, signin=signin)
 
 
 def _confirm(prompt: str) -> bool:
@@ -470,7 +486,8 @@ def _check_modules(cfg: config.Config, add: Add, offline: bool) -> None:
     except Os2sliceError as e:
         add(FAIL, "modules", e.one_line())
         return
-    check_module_health(modules, add)
+    with modules:
+        check_module_health(modules, add)
 
 
 def check_module_secrets(cfg: config.Config, add: Add) -> bool:

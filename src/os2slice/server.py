@@ -268,16 +268,7 @@ class Service:
         if self.jobs.busy():
             log.info("a print job is running; the old modules are left to be collected")
             return
-        seen: set[int] = set()
-        for module in (*old.targets.values(), *old.slicers.values()):
-            close = getattr(module, "close", None)
-            if id(module) in seen or not callable(close):
-                continue
-            seen.add(id(module))
-            try:
-                close()
-            except Exception:
-                log.warning("closing a replaced module failed", exc_info=True)
+        old.close()
 
     def onshape_for(self, user_id: str | None) -> OnshapeClient:
         """API-key mode: the shared client. Sign-in mode: that user's own access."""
@@ -311,7 +302,11 @@ def serve(service: Service) -> None:
     log.info("serving on %s://%s:%s (hosts %s, identity %s)", scheme, s.bind, s.port, s.hosts,
              s.identity)  # fmt: skip
     print(f"os2slice serving on {scheme}://{s.bind}:{s.port} for {', '.join(s.hosts)}")
-    httpd.serve_forever()
+    try:
+        httpd.serve_forever()
+    finally:
+        httpd.server_close()
+        service.modules.close()  # the current ones; reload() closed those it replaced
 
 
 def make_server(service: Service, port: int | None = None) -> ThreadingHTTPServer:

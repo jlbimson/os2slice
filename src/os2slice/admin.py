@@ -502,7 +502,7 @@ def _save(
             trial = svc.build_modules(new, overlay=secrets)
         except Os2sliceError as e:
             raise Invalid(e.one_line()) from e
-        _close_all(trial)
+        trial.close()
         for name, value in secrets.items():
             try:
                 auth.store_secret(name, value)
@@ -517,13 +517,6 @@ def _save(
         return svc.reload()
     except Os2sliceError as e:
         raise Invalid(f"Saved, but the service couldn't reload it: {e.one_line()}") from e
-
-
-def _close_all(mods: registry.Modules) -> None:
-    for m in {id(m): m for m in (*mods.targets.values(), *mods.slicers.values())}.values():
-        close = getattr(m, "close", None)
-        if callable(close):
-            close()
 
 
 def _has_secret(svc: Service, name: str) -> bool:
