@@ -29,6 +29,7 @@ packages = ["src/os2slice"]
 
 [tool.ruff]
 line-length = 100
+extend-exclude = [".claude"]  # agent worktrees
 target-version = "py310"
 
 [tool.ruff.lint]
