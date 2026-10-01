@@ -16,9 +16,9 @@ import httpx
 import pytest
 
 from os2slice import server
-from os2slice.bambuddy import BambuddyClient
 from os2slice.config import Config
 from os2slice.errors import AuthError
+from os2slice.modules.registry import Modules
 from os2slice.oauth import (
     BearerAuth,
     Grant,
@@ -29,7 +29,7 @@ from os2slice.oauth import (
 )
 from os2slice.onshape import OnshapeClient
 from tests.conftest import DOC, ELEM, WS
-from tests.fakes import FakeBambuddy, fake_onshape
+from tests.fakes import FakeBambuddy, fake_modules, fake_onshape
 
 HOST = "localhost:8765"
 NAV = {"Host": HOST, "Sec-Fetch-Dest": "document", "Sec-Fetch-Site": "cross-site"}
@@ -187,9 +187,7 @@ class SignedInServer:
         self.svc = server.Service(
             cfg,
             onshape=no_keys,
-            bambuddy=lambda: BambuddyClient(
-                "http://bb.test", "k", transport=httpx.MockTransport(self.fake)
-            ),
+            modules=fake_modules(cfg, self.fake),
             signin=signin,
         )
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(self.svc))
@@ -386,7 +384,7 @@ def test_sign_out_ends_the_session_and_forgets_the_grant(signed: SignedInServer)
 
 
 def test_auth_routes_are_off_in_key_mode(cfg: Config) -> None:
-    svc = server.Service(cfg, onshape=lambda: None, bambuddy=lambda: None)  # type: ignore[arg-type,return-value]
+    svc = server.Service(cfg, onshape=lambda: None, modules=Modules())  # type: ignore[arg-type,return-value]
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(svc))
     threading.Thread(target=httpd.serve_forever, args=(0.01,), daemon=True).start()
     try:

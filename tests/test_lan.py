@@ -14,11 +14,10 @@ import pytest
 
 from os2slice import config, server
 from os2slice.auth import Keys
-from os2slice.bambuddy import BambuddyClient
 from os2slice.config import Config, ServerConfig
 from os2slice.errors import ConfigError
 from os2slice.onshape import OnshapeClient
-from tests.fakes import FakeBambuddy, fake_onshape
+from tests.fakes import FakeBambuddy, fake_modules, fake_onshape
 
 pytestmark = pytest.mark.skipif(shutil.which("openssl") is None, reason="needs openssl")
 NAME = "davis-print.duckdns.org"
@@ -49,9 +48,7 @@ def lan(cfg: Config, tmp_path: Path):
         onshape=lambda: OnshapeClient(
             "https://cad.onshape.com", Keys("a", "b"), transport=httpx.MockTransport(fake_onshape)
         ),
-        bambuddy=lambda: BambuddyClient(
-            "http://bb.test", "k", transport=httpx.MockTransport(FakeBambuddy())
-        ),
+        modules=fake_modules(lan_cfg, FakeBambuddy()),
     )
     httpd = server.make_server(svc, port=0)
     threading.Thread(target=httpd.serve_forever, args=(0.01,), daemon=True).start()

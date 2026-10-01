@@ -127,7 +127,7 @@ def test_targets_and_printers_tables() -> None:
     assert a1.bed_type == "Textured PEI Plate" and a1.extra == {"preset_source": "cloud"}
     over = cfg.printers["X1C_01"]
     assert over.target is None and over.profiles.filament == "Bambu ASA @BBL X1C"
-    assert cfg.default_printer == "A1 Mini" and cfg.bambuddy is None
+    assert cfg.default_printer == "A1 Mini" and not hasattr(cfg, "bambuddy")
     assert set(cfg.slicers) == set() and cfg.slicer_modules == {}
 
 

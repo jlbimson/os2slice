@@ -219,7 +219,9 @@ def plan_print(
     printed as one object.
     """
     if not modules.targets:
-        raise ConfigError("No printers are configured", f"Add a [targets.<name>] table to {cfg.path}")
+        raise ConfigError(
+            "No printers are configured", f"Add a [targets.<name>] table to {cfg.path}"
+        )
     if req.part_id is None:
         raise BadRequest("Whole Part Studio printing isn't implemented yet", "Pick one part")
     chosen = modules.find(printer)
@@ -316,8 +318,7 @@ def slice_input(
         job_name=stem,
         printer=plan.printer,
         parts=tuple(
-            PartGeometry(p.name, stl, p.material)
-            for p, stl in zip(plan.parts, placed, strict=True)
+            PartGeometry(p.name, stl, p.material) for p, stl in zip(plan.parts, placed, strict=True)
         ),
         settings=plan.settings,
         profiles=plan.profiles,

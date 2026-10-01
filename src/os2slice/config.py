@@ -86,7 +86,6 @@ class Config:
     units: str
     keep_days: int
     slicers: dict[str, SlicerConfig]  # desktop hand-offs ([slicers.*] with argv)
-    bambuddy: BambuddyConfig | None = None
     slicer_modules: dict[str, ModuleConfig] = field(default_factory=dict)
     targets: dict[str, ModuleConfig] = field(default_factory=dict)
     printers: dict[str, PrinterConfig] = field(default_factory=dict)
@@ -130,6 +129,8 @@ class ServerConfig:
 
 @dataclass(frozen=True)
 class BambuddyConfig:
+    """The legacy [bambuddy] table, before it becomes [targets.bambuddy]."""
+
     base_url: str
     folder: str
     default_printer: str
@@ -353,7 +354,6 @@ def parse(data: dict[str, Any], path: Path) -> Config:
         units=units,
         keep_days=keep_days,
         slicers=slicers,
-        bambuddy=bambuddy,
         slicer_modules=slicer_modules,
         targets=targets,
         printers=printers,
