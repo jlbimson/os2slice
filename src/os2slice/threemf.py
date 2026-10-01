@@ -58,11 +58,19 @@ def _header(extra: str = "") -> str:
     )
 
 
-def _plate(object_id: int, filament_maps: list[int] | None) -> str:
+def _plate(object_id: int, filament_maps: list[int] | None, instances: int) -> str:
     if not filament_maps:
         return ""
     maps = " ".join(str(int(m)) for m in filament_maps)
     volume = " ".join("0" for _ in filament_maps)
+    placed = "".join(
+        "    <model_instance>\n"
+        f'      <metadata key="object_id" value="{object_id}"/>\n'
+        f'      <metadata key="instance_id" value="{n}"/>\n'
+        f'      <metadata key="identify_id" value="{n + 1}"/>\n'
+        "    </model_instance>\n"
+        for n in range(instances)
+    )
     return (
         "  <plate>\n"
         '    <metadata key="plater_id" value="1"/>\n'
@@ -71,23 +79,26 @@ def _plate(object_id: int, filament_maps: list[int] | None) -> str:
         '    <metadata key="filament_map_mode" value="Manual"/>\n'
         f'    <metadata key="filament_maps" value="{maps}"/>\n'
         f'    <metadata key="filament_volume_maps" value="{volume}"/>\n'
-        "    <model_instance>\n"
-        f'      <metadata key="object_id" value="{object_id}"/>\n'
-        '      <metadata key="instance_id" value="0"/>\n'
-        '      <metadata key="identify_id" value="1"/>\n'
-        "    </model_instance>\n"
+        f"{placed}"
         "  </plate>\n"
     )
 
 
-def build_3mf(parts: list[Part], object_name: str, filament_maps: list[int] | None = None) -> bytes:
+def build_3mf(
+    parts: list[Part],
+    object_name: str,
+    filament_maps: list[int] | None = None,
+    offsets: list[tuple[float, float]] | None = None,
+) -> bytes:
     """One object whose components are `parts`, each assigned its filament slot.
 
     `filament_maps` (dual-nozzle printers) pins each filament to a slicer extruder
-    (1-based, one entry per filament) via the plate's Manual filament map.
+    (1-based, one entry per filament) via the plate's Manual filament map. `offsets`
+    places copies: one build item (an instance of the object) per X/Y offset, in mm.
     """
     if not parts:
         raise ValueError("no parts")
+    offsets = offsets or [(0.0, 0.0)]
     objects = []
     for n, part in enumerate(parts, start=1):
         verts, tris = _mesh(part.stl)
@@ -105,12 +116,16 @@ def build_3mf(parts: list[Part], object_name: str, filament_maps: list[int] | No
         'transform="1 0 0 0 1 0 0 0 1 0 0 0"/>'
         for n in range(1, len(parts) + 1)
     )
+    items = "".join(
+        f'<item objectid="{top_id}" p:UUID="{uuid.uuid4()}" '
+        f'transform="1 0 0 0 1 0 0 0 1 {dx:.6g} {dy:.6g} 0" printable="1"/>'
+        for dx, dy in offsets
+    )
     top = (
         _header(' <metadata name="Application">os2slice</metadata>\n')
         + f' <resources>\n  <object id="{top_id}" p:UUID="{uuid.uuid4()}" type="model">'
         f"<components>{comps}</components></object>\n </resources>\n"
-        f' <build p:UUID="{uuid.uuid4()}"><item objectid="{top_id}" p:UUID="{uuid.uuid4()}" '
-        'transform="1 0 0 0 1 0 0 0 1 0 0 0" printable="1"/></build>\n</model>\n'
+        f' <build p:UUID="{uuid.uuid4()}">{items}</build>\n</model>\n'
     )
 
     part_meta = "".join(
@@ -126,7 +141,7 @@ def build_3mf(parts: list[Part], object_name: str, filament_maps: list[int] | No
         f'  <object id="{top_id}">\n'
         f'    <metadata key="name" value="{escape(object_name)}"/>\n'
         f'    <metadata key="extruder" value="{int(parts[0].filament)}"/>\n'
-        f"{part_meta}  </object>\n{_plate(top_id, filament_maps)}</config>\n"
+        f"{part_meta}  </object>\n{_plate(top_id, filament_maps, len(offsets))}</config>\n"
     )
 
     types = (

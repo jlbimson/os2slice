@@ -188,6 +188,12 @@
   };
   printer.addEventListener("change", () => { renderExtras(); syncColor(); sync(); });
   orient.addEventListener("change", () => { sync.userPicked = true; sync(); });
+  // The Bambu Studio link carries the settings (copies, brim, ...): rebuild it on edits.
+  const SETTINGS = ["walls", "infill", "supports", "build_plate_only", "top_layers",
+    "bottom_layers", "brim", "copies", "plate"];
+  form.addEventListener("change", (ev) => {
+    if (SETTINGS.includes(ev.target.name)) scheduleStudioLink(selectionOk);
+  });
   syncColor();
 
   window.addEventListener("message", (ev) => {

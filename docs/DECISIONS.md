@@ -87,3 +87,10 @@ reason as on HAOS (D-21). The two containers share a `shared` volume for the inb
 status file; the inbox belongs to uid 1000 (os2slice and the image's `abc` user). Tested
 locally 2026-10-01: doctor all PASS against the real BamBuddy, sign-in redirect, web
 session status, and a cross-container handoff; the `duckdns` script dry-run with stubs.
+
+## D-25: Brim, top/bottom layers and copies (2026-10-01)
+
+- **Brim is a toggle, and off means off.** On sends `brim_type: "outer_only"` (the preset's 5 mm width); off sends `"no_brim"`, overriding the Bambu presets' `auto_brim`, so the checkbox means what it says. `[print_defaults] brim` sets the starting state.
+- **Top/bottom layers are always sent** (`top_shell_layers`, `bottom_shell_layers`, 0–30), like walls and infill. The defaults (5 / 3) are the Bambu "0.20mm Standard" presets' own values. Note Bambu Studio also has `top_shell_thickness`/`bottom_shell_thickness` minimums that can add layers beyond the count; we don't override those.
+- **Copies are laid out by os2slice, not the slicer.** Copies > 1 force the 3MF path: the selection is exported once and the 3MF has one build item per copy, all pointing at the same object (Bambu Studio loads them as instances). The grid is the squarest one that fits the bed (5 mm margin; 6 mm between copies, 16 mm with a brim), centred like a single part, so the prime-tower placement (D-20) sees the whole grid as the footprint. Too many copies for the bed is refused before anything is uploaded. With auto-orient, BamBuddy's auto-arrange is on and re-packs them. 1–25 copies; all copies go on one plate and one queue item.
+- **A missing checkbox in our own forms means unchecked** (`_form_settings`), so a config default of `true` can be turned off from the page. Before this, an unticked "build plate only" fell back to the config default.

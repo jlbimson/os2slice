@@ -398,3 +398,38 @@ def test_tower_retry_on_conflict(x1c_cfg: Config, onshape: OnshapeClient) -> Non
         first["wipe_tower_x"] != second["wipe_tower_x"]
         or first["wipe_tower_y"] != second["wipe_tower_y"]
     )
+
+
+def test_copy_offsets_make_a_centred_grid_that_fits() -> None:
+    assert printing.copy_offsets((30, 20), 1, (180, 180)) == [(0.0, 0.0)]
+    offs = printing.copy_offsets((30, 20), 4, (180, 180), gap=6)
+    assert offs == [(-18.0, -13.0), (18.0, -13.0), (-18.0, 13.0), (18.0, 13.0)]  # 2 x 2
+    # A long part goes in one column of rows, not a row that would run off the bed.
+    offs = printing.copy_offsets((150, 20), 3, (180, 180), gap=6)
+    assert {x for x, _ in offs} == {0.0} and len({y for _, y in offs}) == 3
+    with pytest.raises(BadRequest, match="don't fit"):
+        printing.copy_offsets((100, 100), 2, (180, 180))
+
+
+def test_copies_upload_one_object_placed_several_times(cfg: Config, onshape: OnshapeClient) -> None:
+    fake = FakeBambuddy(job_states=["completed"])
+    p = dataclasses.replace(plan(cfg, onshape, fake), settings=PrintSettings(copies=3, brim=True))
+    assert "3 copies" in "\n".join(p.summary_lines())
+    printing.execute_print(p, cfg, onshape, bb(fake), queue=True)
+    model = uploaded_zip(fake).read("3D/3dmodel.model").decode()
+    assert model.count("<item ") == 3
+    body = fake.slice_bodies[0]
+    assert body["auto_arrange"] is False  # os2slice laid the copies out
+    assert body["process_overrides"]["brim_type"] == "outer_only"
+    assert len(fake.queued) == 1  # one plate, one print
+
+
+def test_too_many_copies_is_refused_before_upload(
+    cfg: Config, onshape: OnshapeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(printing.BED_MM, "A1 Mini", (12, 12))  # 2 mm of room: no gap fits
+    fake = FakeBambuddy(job_states=["completed"])
+    p = dataclasses.replace(plan(cfg, onshape, fake), settings=PrintSettings(copies=2))
+    with pytest.raises(BadRequest, match="don't fit"):
+        printing.execute_print(p, cfg, onshape, bb(fake), queue=True)
+    assert not fake.uploads and not fake.queued

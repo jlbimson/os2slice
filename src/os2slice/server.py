@@ -59,7 +59,14 @@ from os2slice.oauth import static_bearer as oauth_static_bearer
 from os2slice.onshape import OnshapeClient
 from os2slice.orientation import FACE_ID_RE, Orientation
 from os2slice.request import PART_ID_RE, ExportRequest, parse_print_query
-from os2slice.settings import PLATE_LABELS, SUPPORTS, PrintSettings, check_bed_type
+from os2slice.settings import (
+    COPIES_RANGE,
+    PLATE_LABELS,
+    SHELL_RANGE,
+    SUPPORTS,
+    PrintSettings,
+    check_bed_type,
+)
 
 log = logging.getLogger(__name__)
 
@@ -76,11 +83,16 @@ FORM_FIELDS = frozenset(
         "infill",
         "supports",
         "build_plate_only",
+        "top_layers",
+        "bottom_layers",
+        "brim",
+        "copies",
         "face",
         "plate",
         "extra",
     }
 )
+CHECKBOXES = ("build_plate_only", "brim")  # an unchecked box isn't sent at all
 EXTRA_RE = re.compile(r"([A-Za-z0-9_+\-]{1,32}):(\d{1,3})")
 MAX_PARTS = 16
 ORIENT_CHOICES = [
@@ -537,7 +549,7 @@ class _Handler(BaseHTTPRequestHandler):
         form = self._read_form()
         req, face, orientation, printer, slot, extra = _selection(form, panel)
         fields = {k: form[k] for k in REQUEST_FIELDS if k in form and form[k] != ""}
-        settings = PrintSettings.from_strings(form, self.svc.cfg.print_defaults)
+        settings = _form_settings(form, self.svc.cfg)
         plate = check_bed_type(form.get("plate"))
         # Redeem last, so a typo in a setting doesn't burn the form. The panel's token
         # is bound to the Part Studio (the part comes from the live selection).
@@ -640,9 +652,7 @@ class _Handler(BaseHTTPRequestHandler):
     # -- the shared web Bambu Studio session (D-21) ---------------------------
 
     def _studio_settings(self, form: dict[str, str]) -> tuple[PrintSettings, str | None]:
-        return PrintSettings.from_strings(form, self.svc.cfg.print_defaults), check_bed_type(
-            form.get("plate")
-        )
+        return _form_settings(form, self.svc.cfg), check_bed_type(form.get("plate"))
 
     def _studio_project(
         self, selection: Selection, settings: PrintSettings, plate: str | None, uid: str | None
@@ -909,7 +919,6 @@ def _print_form(
     token: str,
 ) -> str:
     assert cfg.bambuddy is not None  # noqa: S101 - checked by the caller
-    d = cfg.print_defaults
     hidden = "".join(
         f'<input type="hidden" name="{k}" value="{_e(v)}">'
         for k, v in (
@@ -932,22 +941,16 @@ def _print_form(
         if cfg.bambuddy.manual_start
         else "starts as soon as the printer is free"
     )
-    supports = _options(((s, s.capitalize()) for s in SUPPORTS), d.supports)
     return f"""
 <dl><dt>Part</dt><dd>{_e(part)}</dd><dt>Document</dt><dd>{_e(doc)}</dd>{config}</dl>
 <form method="post" action="/print">{hidden}
 {_printer_select(views, cfg)}
 {_plate_select(cfg)}
 <label>Orientation <select name="orient">{_options(ORIENT_CHOICES, "as-modeled")}</select></label>
-<div class="row">
-<label>Walls <input type="number" name="walls" min="1" max="10" value="{d.walls}" required></label>
-<label>Infill % <input type="number" name="infill" min="0" max="100" value="{d.infill}" required></label>
-<label>Supports <select name="supports">{supports}</select></label>
-</div>
-<label class="check"><input type="checkbox" name="build_plate_only" value="true"{" checked" if d.build_plate_only else ""}> Supports from the build plate only</label>
+{_settings_fields(cfg)}
 <p class="muted">The print {_e(start)}.</p>
 <button type="submit">Slice and queue print</button>
-</form>"""  # noqa: E501
+</form>"""
 
 
 def _plate_select(cfg: Config) -> str:
@@ -957,17 +960,32 @@ def _plate_select(cfg: Config) -> str:
     return f'<label>Build plate <select name="plate">{opts}</select></label>'
 
 
+def _form_settings(form: dict[str, str], cfg: Config) -> PrintSettings:
+    """Settings from one of our own forms, where a missing checkbox means unchecked."""
+    return PrintSettings.from_strings({c: "" for c in CHECKBOXES} | form, cfg.print_defaults)
+
+
 def _settings_fields(cfg: Config) -> str:
     d = cfg.print_defaults
+
+    def checked(on: bool) -> str:
+        return " checked" if on else ""
+
     supports = _options(((s, s.capitalize()) for s in SUPPORTS), d.supports)
-    checked = " checked" if d.build_plate_only else ""
+    lo, hi = SHELL_RANGE
     return f"""<div class="row">
 <label>Walls <input type="number" name="walls" min="1" max="10" value="{d.walls}" required></label>
 <label>Infill % <input type="number" name="infill" min="0" max="100" value="{d.infill}" required>
 </label><label>Supports <select name="supports">{supports}</select></label>
 </div>
-<label class="check"><input type="checkbox" name="build_plate_only" value="true"{checked}>
-Supports from the build plate only</label>"""
+<label class="check"><input type="checkbox" name="build_plate_only" value="true"{checked(d.build_plate_only)}>
+Supports from the build plate only</label>
+<div class="row">
+<label>Top layers <input type="number" name="top_layers" min="{lo}" max="{hi}" value="{d.top_layers}" required></label>
+<label>Bottom layers <input type="number" name="bottom_layers" min="{lo}" max="{hi}" value="{d.bottom_layers}" required></label>
+<label>Copies <input type="number" name="copies" min="{COPIES_RANGE[0]}" max="{COPIES_RANGE[1]}" value="{d.copies}" required></label>
+</div>
+<label class="check"><input type="checkbox" name="brim" value="true"{checked(d.brim)}> Brim</label>"""  # noqa: E501
 
 
 @dataclass(frozen=True)
@@ -1150,9 +1168,11 @@ def _panel_body(
     manual = cfg.bambuddy is not None and cfg.bambuddy.manual_start
     start = "Waits in BamBuddy until you press Start." if manual else ""
     beds = {v.printer.name: BED_MM.get(v.printer.model, (256, 256)) for v in views}
+    # The preview lays copies out like printing.copy_offsets, with the same spacing.
+    layout = {"gap": printing.COPY_GAP, "brimGap": printing.BRIM_GAP, "margin": printing.BED_MARGIN}
     return f"""<div id="panel" data-onshape="{_e(cfg.onshape_base_url)}"
  data-ids="{_e(json.dumps(ids))}" data-parts="{_e(json.dumps(parts))}"
- data-beds="{_e(json.dumps(beds))}">
+ data-beds="{_e(json.dumps(beds))}" data-layout="{_e(json.dumps(layout))}">
 <p id="selection" class="sel">Loading…</p>
 {_studio_links(cfg)}
 <p class="links"><a href="{_e(bambuddy_ui)}/queue" target="_blank" rel="noopener">

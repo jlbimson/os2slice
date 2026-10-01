@@ -53,6 +53,36 @@ BED_MM = {"H2D": (350, 320), "H2D Pro": (350, 320), "H2S": (340, 320), "H2C": (3
 SHARED_X = {"H2D": (25, 325), "H2D Pro": (25, 325), "H2C": (25, 325)}
 TOWER_W, TOWER_D, GAP = 40.0, 60.0, 12.0  # generous tower footprint and clearance, mm
 TOWER_ERRORS = ("conflict", "unprintable area", "wipe tower", "prime tower")
+# Copies: gap between neighbours (more with a brim, Bambu's default brim is 5 mm wide)
+# and a margin kept clear around the bed's edge, mm.
+COPY_GAP, BRIM_GAP, BED_MARGIN = 6.0, 10.0, 5.0
+
+
+def copy_offsets(
+    size: tuple[float, float], copies: int, bed: tuple[float, float], gap: float = COPY_GAP
+) -> list[tuple[float, float]]:
+    """X/Y offsets that lay `copies` of a `size` (w, d) footprint out in a grid centred
+    on its current position, row by row from the front left; the squarest grid that fits.
+    """
+    w, d = size
+    room_w, room_d = bed[0] - 2 * BED_MARGIN, bed[1] - 2 * BED_MARGIN
+    best: tuple[float, int, int] | None = None
+    for cols in range(1, copies + 1):
+        rows = -(-copies // cols)
+        grid_w, grid_d = cols * w + (cols - 1) * gap, rows * d + (rows - 1) * gap
+        if grid_w <= room_w and grid_d <= room_d:
+            score = max(grid_w / room_w, grid_d / room_d)
+            if best is None or score < best[0]:
+                best = (score, cols, rows)
+    if best is None:
+        raise BadRequest(
+            f"{copies} copies don't fit on the plate",
+            f"Each copy is {w:.0f} x {d:.0f} mm; print fewer copies",
+        )
+    _, cols, rows = best
+    pitch_x, pitch_y = w + gap, d + gap
+    x0, y0 = -(cols - 1) * pitch_x / 2, -(rows - 1) * pitch_y / 2
+    return [(x0 + (n % cols) * pitch_x, y0 + (n // cols) * pitch_y) for n in range(copies)]
 
 
 def tower_spots(model: str, footprint: tuple[float, float, float, float]) -> list[dict[str, str]]:
@@ -313,7 +343,8 @@ def execute_print(
     root = bambuddy.ensure_folder(cfg.bambuddy.folder)
     folder = bambuddy.ensure_folder(files.sanitize(plan.document_name, "document"), root)
     dual = plan.printer.nozzle_count > 1
-    as_3mf = force_3mf or plan.multi or (dual and plan.slot is not None)
+    copies = plan.settings.copies > 1  # laid out by os2slice, in a 3MF
+    as_3mf = force_3mf or plan.multi or copies or (dual and plan.slot is not None)
     threemf = None
 
     if not as_3mf:
@@ -423,17 +454,18 @@ def studio_project(
 
 @dataclass(frozen=True)
 class Assembly:
-    threemf: bytes  # the parts as one object, oriented and centred on the bed
+    threemf: bytes  # the parts as one object (one instance per copy), centred on the bed
     slots: list[Slot]  # filament n is slots[n-1] (empty when printing with the preset)
     presets: list[str]  # filament preset per filament
-    footprint: tuple[float, float, float, float]  # x0, y0, x1, y1 on the bed, mm
+    footprint: tuple[float, float, float, float]  # x0, y0, x1, y1 of all copies on the bed, mm
 
 
 def assemble(plan: PrintPlan, onshape: OnshapeClient, rotation: Matrix | None = None) -> Assembly:
     """Export the plan's parts and pack them into one Bambu-style 3MF object.
 
     Used both to print (uploaded to BamBuddy) and to open in Bambu Studio. Parts
-    share one rotation and one drop; the assembly is centred on the printer's bed;
+    share one rotation and one drop; the assembly (or the grid of its copies) is
+    centred on the printer's bed;
     each distinct slot becomes a filament, pinned to its nozzle on dual-nozzle
     printers. Without slots every part is filament 1.
     """
@@ -450,6 +482,8 @@ def assemble(plan: PrintPlan, onshape: OnshapeClient, rotation: Matrix | None = 
     x1, y1 = max(b[1][0] for b in boxes), max(b[1][1] for b in boxes)
     dx, dy = bed_w / 2 - (x0 + x1) / 2, bed_d / 2 - (y0 + y1) / 2
     placed = [translate_xy(s, dx, dy) for s in placed]
+    gap = COPY_GAP + (BRIM_GAP if plan.settings.brim else 0.0)
+    offsets = copy_offsets((x1 - x0, y1 - y0), plan.settings.copies, (bed_w, bed_d), gap)
     slots: list[Slot] = []
     presets: list[str] = []
     index: dict[int, int] = {}
@@ -466,11 +500,13 @@ def assemble(plan: PrintPlan, onshape: OnshapeClient, rotation: Matrix | None = 
     ]
     dual = plan.printer.nozzle_count > 1
     maps = [1 if s.extruder == 1 else 2 for s in slots] if dual and slots else None
+    ox0, oy0 = min(o[0] for o in offsets), min(o[1] for o in offsets)
+    ox1, oy1 = max(o[0] for o in offsets), max(o[1] for o in offsets)
     return Assembly(
-        build_3mf(parts, plan.part_name, maps),
+        build_3mf(parts, plan.part_name, maps, offsets),
         slots,
         presets,
-        (x0 + dx, y0 + dy, x1 + dx, y1 + dy),
+        (x0 + dx + ox0, y0 + dy + oy0, x1 + dx + ox1, y1 + dy + oy1),
     )
 
 

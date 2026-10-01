@@ -1,5 +1,6 @@
 // os2slice panel preview: the selected part(s), oriented as they will print, on the chosen bed.
 // Z is up (like the slicer). Each part is drawn in its filament's colour. Renders on change only.
+// Copies are laid out here exactly as printing.copy_offsets places them on the plate.
 import * as THREE from "./vendor/three.module.js";
 import { STLLoader } from "./vendor/STLLoader.js";
 import { OrbitControls } from "./vendor/OrbitControls.js";
@@ -9,6 +10,7 @@ const box = document.getElementById("preview");
 const note = document.getElementById("preview-note");
 const form = document.getElementById("printform");
 const beds = JSON.parse(root.dataset.beds || "{}");
+const LAYOUT = JSON.parse(root.dataset.layout || '{"gap":6,"brimGap":10,"margin":5}');
 
 const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
 const scene = new THREE.Scene();
@@ -31,7 +33,9 @@ controls.addEventListener("change", render);
 
 const bedGroup = new THREE.Group();
 scene.add(bedGroup);
-let model = null; // THREE.Group of part meshes
+let base = null; // THREE.Group: one copy of the part meshes, centred on the bed
+let baseSize = null; // [x, y, z] of one copy, mm
+let model = null; // THREE.Group of every copy (clones share base's geometry and materials)
 let bedSize = [256, 256];
 
 function render() {
@@ -102,10 +106,68 @@ function shade(hex) {
 }
 
 function recolour() {
-  if (!model) return;
+  if (!base) return;
   const colours = window.os2sliceColours ? window.os2sliceColours() : {};
-  for (const m of model.children) m.material.color.copy(shade(colours[m.userData.part]));
+  for (const m of base.children) m.material.color.copy(shade(colours[m.userData.part]));
   render();
+}
+
+// Port of printing.copy_offsets: the squarest grid that fits, centred, front-left first.
+// Returns null when the copies don't fit.
+function copyOffsets([w, d], copies, [bedW, bedD], gap) {
+  const roomW = bedW - 2 * LAYOUT.margin;
+  const roomD = bedD - 2 * LAYOUT.margin;
+  let best = null;
+  for (let cols = 1; cols <= copies; cols++) {
+    const rows = Math.ceil(copies / cols);
+    const gridW = cols * w + (cols - 1) * gap;
+    const gridD = rows * d + (rows - 1) * gap;
+    if (gridW <= roomW && gridD <= roomD) {
+      const score = Math.max(gridW / roomW, gridD / roomD);
+      if (!best || score < best.score) best = { score, cols, rows };
+    }
+  }
+  if (!best) return null;
+  const px = w + gap;
+  const py = d + gap;
+  const x0 = (-(best.cols - 1) * px) / 2;
+  const y0 = (-(best.rows - 1) * py) / 2;
+  return Array.from({ length: copies }, (_, n) => [
+    x0 + (n % best.cols) * px, y0 + Math.floor(n / best.cols) * py,
+  ]);
+}
+
+function copiesWanted() {
+  const n = parseInt(form.elements.copies ? form.elements.copies.value : "1", 10);
+  return Number.isInteger(n) && n >= 1 && n <= 25 ? n : 1;
+}
+
+// Place the copies of `base` on the bed and describe the result. No download needed.
+function layout() {
+  if (!base) return;
+  const f = form.elements;
+  const copies = copiesWanted();
+  const gap = LAYOUT.gap + (f.brim && f.brim.checked ? LAYOUT.brimGap : 0);
+  const offsets = copyOffsets([baseSize[0], baseSize[1]], copies, bedSize, gap);
+  if (model) scene.remove(model);
+  model = new THREE.Group();
+  for (const [x, y] of offsets || [[0, 0]]) {
+    const copy = base.clone();
+    copy.position.x += x;
+    copy.position.y += y;
+    model.add(copy);
+  }
+  scene.add(model);
+  frame();
+  const [sx, sy, sz] = baseSize;
+  const dims = `${sx.toFixed(1)} × ${sy.toFixed(1)} × ${sz.toFixed(1)} mm`;
+  const parts = base.children.length > 1 ? ` · ${base.children.length} parts` : "";
+  const auto = f.orient.value === "auto" ? " · the slicer will pick the orientation" : "";
+  let text = `${dims}${parts}${auto}`;
+  if (sx > bedSize[0] || sy > bedSize[1]) text = `${dims} · larger than this printer's bed!`;
+  else if (!offsets) text = `${dims} · ${copies} copies don't fit on this bed!`;
+  else if (copies > 1) text += ` · ${copies} copies`;
+  setNote(text);
 }
 
 let timer = 0;
@@ -126,6 +188,7 @@ async function refresh() {
   const f = form.elements;
   if (!f.p.value && !f.face.value) {
     if (model) { scene.remove(model); model = null; render(); }
+    base = null;
     setNote("Select a part to preview it.");
     return;
   }
@@ -154,20 +217,14 @@ async function refresh() {
       mesh.userData.part = id || f.p.value;
       group.add(mesh);
     }
-    // The slicer's auto-arrange centres the object; mirror that for the whole assembly.
+    // os2slice centres the assembly on the bed (the grid of copies, too); mirror that.
     const b = new THREE.Box3().setFromObject(group);
     group.position.set(-(b.min.x + b.max.x) / 2, -(b.min.y + b.max.y) / 2, -b.min.z);
-    if (model) scene.remove(model);
-    model = group;
-    scene.add(model);
-    recolour();
-    frame();
     const s = b.getSize(new THREE.Vector3());
-    const dims = `${s.x.toFixed(1)} × ${s.y.toFixed(1)} × ${s.z.toFixed(1)} mm`;
-    const tooBig = s.x > bedSize[0] || s.y > bedSize[1];
-    const auto = f.orient.value === "auto" ? " · the slicer will pick the orientation" : "";
-    const count = ids.length > 1 ? ` · ${ids.length} parts` : "";
-    setNote(tooBig ? `${dims} · larger than this printer's bed!` : `${dims}${count}${auto}`);
+    base = group;
+    baseSize = [s.x, s.y, s.z];
+    recolour();
+    layout();
   } catch (err) {
     if (err.name !== "AbortError") setNote(`No preview: ${err.message}`);
   }
@@ -177,7 +234,10 @@ document.addEventListener("os2slice:selection", schedule);
 document.addEventListener("os2slice:color", recolour);
 form.addEventListener("change", (ev) => {
   if (["printer", "orient"].includes(ev.target.name)) schedule();
+  else if (["copies", "brim"].includes(ev.target.name)) layout();
   else if (ev.target.dataset && ev.target.dataset.part) recolour();
 });
+// Typing or using the arrows in the copies box updates the plate straight away.
+form.addEventListener("input", (ev) => { if (ev.target.name === "copies") layout(); });
 resize();
 refresh();

@@ -52,6 +52,10 @@ def check_bed_type(value: str | None) -> str | None:
 
 WALLS_RANGE = (1, 10)
 INFILL_RANGE = (0, 100)
+SHELL_RANGE = (0, 30)  # top/bottom solid layers
+COPIES_RANGE = (1, 25)
+TRUE_WORDS = ("1", "true", "on", "yes")
+FALSE_WORDS = ("0", "false", "off", "no", "")
 
 
 @dataclass(frozen=True)
@@ -60,14 +64,22 @@ class PrintSettings:
     infill: int = 15  # percent
     supports: Supports = "off"
     build_plate_only: bool = False
+    top_layers: int = 5  # the Bambu "0.20mm Standard" presets' own values
+    bottom_layers: int = 3
+    brim: bool = False  # True: outer brim; False: none (overrides the preset's auto brim)
+    copies: int = 1  # of the whole selection on one plate; laid out by os2slice, not a slicer key
 
     def __post_init__(self) -> None:
         _check_int("walls", self.walls, WALLS_RANGE)
         _check_int("infill", self.infill, INFILL_RANGE)
+        _check_int("top_layers", self.top_layers, SHELL_RANGE)
+        _check_int("bottom_layers", self.bottom_layers, SHELL_RANGE)
+        _check_int("copies", self.copies, COPIES_RANGE)
         if self.supports not in SUPPORTS:
             raise BadRequest(f"supports must be one of {', '.join(SUPPORTS)}")
-        if not isinstance(self.build_plate_only, bool):
-            raise BadRequest("build_plate_only must be true or false")
+        for name in ("build_plate_only", "brim"):
+            if not isinstance(getattr(self, name), bool):
+                raise BadRequest(f"{name} must be true or false")
 
     def process_overrides(self) -> dict[str, Any]:
         """Bambu Studio process keys, in the shapes verified in docs/BAMBUDDY_API.md."""
@@ -75,6 +87,9 @@ class PrintSettings:
             "wall_loops": self.walls,
             "sparse_infill_density": f"{self.infill}%",
             "enable_support": 1 if self.supports != "off" else 0,
+            "top_shell_layers": self.top_layers,
+            "bottom_shell_layers": self.bottom_layers,
+            "brim_type": "outer_only" if self.brim else "no_brim",
         }
         if self.supports != "off":
             overrides["support_type"] = SUPPORT_TYPE[self.supports]
@@ -85,7 +100,12 @@ class PrintSettings:
         sup = "no supports" if self.supports == "off" else f"{self.supports} supports"
         if self.supports != "off" and self.build_plate_only:
             sup += " (build plate only)"
-        return f"{self.walls} walls, {self.infill}% infill, {sup}"
+        shells = f"{self.top_layers} top / {self.bottom_layers} bottom layers"
+        text = f"{self.walls} walls, {self.infill}% infill, {sup}, {shells}"
+        text += ", brim" if self.brim else ", no brim"
+        if self.copies > 1:
+            text += f", {self.copies} copies"
+        return text
 
     @classmethod
     def from_strings(cls, values: Mapping[str, str], defaults: PrintSettings) -> PrintSettings:
@@ -95,22 +115,35 @@ class PrintSettings:
         supports = values.get("supports") or defaults.supports
         if supports not in SUPPORTS:
             raise BadRequest(f"supports must be one of {', '.join(SUPPORTS)}")
-        bpo_raw = values.get("build_plate_only")
-        if bpo_raw is None:
-            bpo = defaults.build_plate_only
-        elif bpo_raw in ("1", "true", "on", "yes"):
-            bpo = True
-        elif bpo_raw in ("0", "false", "off", "no", ""):
-            bpo = False
-        else:
-            raise BadRequest("build_plate_only must be true or false")
-        return cls(walls, infill, cast(Supports, supports), bpo)
+        return cls(
+            walls,
+            infill,
+            cast(Supports, supports),
+            _parse_bool(
+                "build_plate_only", values.get("build_plate_only"), defaults.build_plate_only
+            ),
+            _parse_int("top_layers", values.get("top_layers"), defaults.top_layers),
+            _parse_int("bottom_layers", values.get("bottom_layers"), defaults.bottom_layers),
+            _parse_bool("brim", values.get("brim"), defaults.brim),
+            _parse_int("copies", values.get("copies"), defaults.copies),
+        )
 
 
 def _check_int(name: str, value: object, bounds: tuple[int, int]) -> None:
     lo, hi = bounds
     if not isinstance(value, int) or isinstance(value, bool) or not lo <= value <= hi:
         raise BadRequest(f"{name} must be a whole number from {lo} to {hi}")
+
+
+def _parse_bool(name: str, raw: str | None, default: bool) -> bool:
+    """A checkbox: absent from the form = unchecked, so callers pass "" for that."""
+    if raw is None:
+        return default
+    if raw in TRUE_WORDS:
+        return True
+    if raw in FALSE_WORDS:
+        return False
+    raise BadRequest(f"{name} must be true or false")
 
 
 def _parse_int(name: str, raw: str | None, default: int) -> int:

@@ -15,7 +15,7 @@ Print Onshape parts through BamBuddy from inside Onshape: pick the part, the fac
 | `hosts` | The name and port browsers use, e.g. `print.example.duckdns.org:8443`; other names are refused. The first one forms the sign-in redirect URL |
 | `web_studio_url` | The Bambu Studio (web) add-on's address, or empty to hide its link |
 | `default_printer`, `presets` | BamBuddy printer name, and slicer presets per printer model |
-| `walls`, `infill`, `supports`, `build_plate_only` | Starting values shown on the print page |
+| `walls`, `infill`, `supports`, `build_plate_only`, `top_layers`, `bottom_layers`, `brim`, `copies` | Starting values shown on the print page |
 | `default_plate` | Build plate used unless a print or a preset's `bed_type` says otherwise. `High Temp Plate` is Bambu's name for smooth PEI |
 | `manual_start` | Keep `true`: queued jobs wait for Start in BamBuddy |
 
