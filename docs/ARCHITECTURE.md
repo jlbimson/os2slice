@@ -1,92 +1,128 @@
 # Architecture
 
-## Target: print through BamBuddy (Phases 2–6)
+os2slice is a CAD → print broker. The part comes from Onshape; a **slicer module** turns
+it into a print file and a **target module** hands that file to a printer or a queue.
+Both are bound per printer in config and can be edited on the config page `/admin`.
+The module contract, the kinds, the config tables and the module checklist are in
+[`MODULES.md`](MODULES.md); this page covers the service around them.
+
+## The print service (deployed)
 
 ```
-Onshape (browser, any machine on Josh's tailnet)
-  ├─ M3: right-click part → "Print with BamBuddy" → new tab GET /print?d=…&wv=…&wvid=…&e=…&p=…&c=…
-  └─ M4: Element right panel iframe GET /panel  ⇄ postMessage (applicationInit, SELECTION: part + bed face)
-       └─ https://<service>.<tailnet>.ts.net   (Tailscale add-on, HTTPS, Tailscale-User-Login)
-            └─ os2slice add-on on homeassistant (HAOS), 127.0.0.1:8765
-                      ├─ check Host, Tailscale user, params          (no side effects on GET)
-                      ├─ Onshape: part + document names
-                      ├─ BamBuddy: printers + status, presets
-                      └─ page/panel: printer, orientation, walls, infill, supports
-                              ──[POST + CSRF, same-origin]──► job
-                                                                          ├─ Onshape: export STL
-                                                                          ├─ orient: rotate mesh (face-down normal → −Z), drop to Z=0
-                                                                          ├─ BamBuddy: upload to library folder
-                                                                          ├─ BamBuddy: slice job with setting overrides → poll → .gcode.3mf
-                                                                          ├─ BamBuddy: queue/start on chosen printer
-                                                                          └─ /jobs/<id> page shows progress
+Onshape (browser, any machine on the printers' LAN)
+  ├─ right-click part → new tab GET /print?d=…&wv=…&wvid=…&e=…&p=…&c=…   (confirmation page)
+  └─ Element right panel → iframe GET /panel  ⇄ postMessage (applicationInit, SELECTION: parts + bed face)
+       └─ https://<name>.duckdns.org:8443   (D-17: LAN address, HTTPS served by os2slice itself)
+            └─ os2slice serve   (HA add-on on barnassistant, or Docker Compose; server.py)
+                 ├─ check Host, identity, params, Sec-Fetch-*            (a GET changes nothing)
+                 ├─ Onshape (read-only; per-user OAuth or one key pair): part + document names, preview
+                 ├─ Modules (registry.py): every target's printers() + status(), materials
+                 └─ page / panel: printer, filament, orientation, walls, infill, supports, copies
+                         ──[POST + single-use CSRF token, same-origin]──► job (jobs.py, printing.py)
+                                ├─ Onshape: export STL per part
+                                ├─ orient: one rotation (face-down normal → −Z), drop to Z = 0
+                                ├─ the printer's slicer module: SliceInput → slice() → SliceOutput
+                                │     bambuddy (slices in BamBuddy) | bambu-studio-api / orca-slicer-api (sidecars)
+                                ├─ the printer's target module: submit(start=False) → Submission
+                                │     bambuddy (queue) | moonraker | prusalink
+                                └─ /jobs/<id> shows progress and the result
+  /admin   the config page (admin.py): modules, printers, defaults, secrets, doctor, jobs, log
 ```
 
-- BamBuddy runs on the same NUC (HA add-on, host network, port 8000), so os2slice reaches it at its local URL from config (default API base `/api/v1`, `X-API-Key` header, from BamBuddy's API reference). **Exact upload, slice and queue shapes are unverified until Phase 2**; they go in `BAMBUDDY_API.md`.
-- Slicing uses BamBuddy's sidecar (Bambu Studio recommended by BamBuddy's docs). It accepts STL and 3MF, not STEP.
-- Safety model: D-13. Access model: D-11. Packaging and secrets: D-12.
-- Reused from Phase 1 unchanged: `request.py` (the IDs and config validation; the `slicer` param becomes optional for `/print`), `onshape.py`, `files.py`, `errors.py`, `config.py` (plus new tables).
-- New modules: `bambuddy.py` (client), `orientation.py` (STL rotation), `settings.py` (validated print settings), `server.py` (page, panel, jobs, header/identity/CSRF/framing checks), `jobs.py` (background job state). Packaging: `addon/` (HA local add-on: Dockerfile, `config.yaml`).
-- Orientation and settings: D-14. Panel as the primary UI: D-15.
+- Deployed 2026-10-01: add-on 0.2.0 on barnassistant (Home Assistant OS) at
+  `https://dm-print.duckdns.org:8443`, beside the BamBuddy and "Bambu Studio API" add-ons.
+  Its config uses `[targets.bambuddy]` (migrated from the legacy `[bambuddy]` table on
+  `/admin`) and the Bambu Studio API add-on as a `bambu-studio-api` slicer.
+- A printer = a target + a slicer + profiles. Discovering targets (BamBuddy) list their
+  printers and take per-model defaults (`[targets.<key>.models."<model>"]`); others are
+  configured by hand (`[printers.<key>]`). Pairing rules and the config schema:
+  [`MODULES.md`](MODULES.md).
+- Modules call only their configured URL. Endpoint notes: [`BAMBUDDY_API.md`](BAMBUDDY_API.md),
+  [`SLICERAPI_API.md`](SLICERAPI_API.md), [`PRINTER_APIS.md`](PRINTER_APIS.md).
+- `Service.reload()` swaps config and modules after an `/admin` save; server and Onshape
+  settings apply after a restart (D-31).
+- "Open in Bambu Studio" (D-21) slices with the printer's slicer and hands a project 3MF to
+  the shared web Bambu Studio (`/share/os2slice/inbox`) or offers it as a download link.
+- Safety model: D-13. Access: D-17. Sign-in: D-23. Packaging: D-12 (add-on), D-24 (Docker).
+  Modules: D-27, D-29, D-30. Config page: D-28, D-31, D-32.
 
-## Secondary: local-slicer mode (Phases 0–1, built)
+## Secondary: local-slicer mode (Phases 0–1)
 
 ```
-Onshape (browser)
-  └─ right-click part → "Send to OrcaSlicer"   [Onshape extension, action: Open in new window]
-       └─ new tab: http://localhost:8765/open?slicer=orca&d=…&wv=w&wvid=…&e=…&p=…&c=…&<Onshape's own params>
-            └─ `os2slice serve`   (systemd user service, bound to 127.0.0.1:8765)
-                 ├─ check Host + Sec-Fetch-* headers (D-9)
-                 ├─ validate params → ExportRequest
-                 ├─ keyring → API keys
-                 ├─ Onshape REST API → part name + STL bytes
-                 ├─ write ~/OnshapeExports/<doc>/<part>_<cfg>_<ts>.stl
-                 ├─ Popen([slicer, file])   (detached)
-                 ├─ notify-send "Sent <part> to OrcaSlicer"
-                 └─ reply with a small HTML page: "Sent Part 1 to OrcaSlicer" or the error + fix
+os2slice send --slicer orca --url <Part Studio URL> [--part …]
+os2slice handle 'http://localhost:8765/open?slicer=orca&d=…&wv=w&wvid=…&e=…&p=…&c=…'
+  └─ pipeline.py
+       ├─ validate params → ExportRequest   (request.py)
+       ├─ keyring → Onshape API keys
+       ├─ Onshape REST API → part name + STL bytes
+       ├─ write ~/OnshapeExports/<doc>/<part>_<cfg>_<ts>.stl
+       ├─ Popen([slicer argv…, file])   (detached; argv from [slicers.<key>], slicers.py)
+       └─ notify-send "Sent <part> to OrcaSlicer" (or the error + fix)
 ```
 
-The only outbound network traffic is the helper calling the Onshape API. Nothing is hosted. See D-3 for why this is a localhost listener rather than a custom `os2slice://` scheme, and how that option stays open.
+The only outbound traffic is the Onshape API. Nothing is hosted. D-3 chose a localhost
+listener (`http://localhost:8765/open?…`, opened by an Onshape extension) over a custom
+`os2slice://` scheme. **In this tree the listener isn't wired up:** `os2slice serve` is
+the print service and has no `/open` route, and there is no `install-service` subcommand
+or `platform/` package. `handle` parses such a URL and runs the same pipeline, so the
+listener only needs a route and a user service. Its HTTP-layer rules (D-9) are kept below
+for when it is.
 
 ## Module layout (current)
 
 ```
 src/os2slice/
   __init__.py
-  cli.py          argparse entry point; serve/handle/send/setup-keys/install-service/uninstall-service/doctor
+  __main__.py     python -m os2slice
+  cli.py          argparse entry point: send, print, serve, handle, setup-keys, doctor, admin-password
+  addon.py        Home Assistant add-on entry point (os2slice-addon): options → config.toml, secrets, admin password
   request.py      query params / Onshape browser URL → ExportRequest (validation lives here)
-  pipeline.py     ExportRequest → export → save → launch → notify; returns a Result (used by serve, handle, send)
-  server.py       stdlib ThreadingHTTPServer: routing, header checks, HTML result page
-  config.py       TOML config load/default/validate
-  auth.py         keyring + env fallback
-  onshape.py      httpx client: part name, document name, STL export (later: translations)
-  files.py        naming, sanitizing, pruning
-  slicers.py      argv building + detached launch (the desktop hand-off)
-  notify.py       desktop notifications
-  logsetup.py     rotating file log
+  pipeline.py     local mode: ExportRequest → export → save → launch → notify; returns a Result (send, handle)
+  server.py       stdlib ThreadingHTTPServer: routing, Host/identity/Sec-Fetch checks, /print, /panel, /jobs, sign-in, TLS reload
+  admin.py        the config page /admin: forms that edit config.toml, secrets, doctor, jobs, log (D-28, D-31)
+  adminauth.py    admin password (scrypt hash in admin.json), login rate limit, admin sessions
+  tomlwrite.py    small TOML writer for our own schema + atomic file writes (used by admin.py)
+  config.py       TOML config load/default/validate, including [slicers.*], [targets.*], [printers.*]
+  default_config.toml  the config written on first run (same text as os2slice.example.toml)
+  auth.py         secret store: keyring, else secrets.json (add-on, Docker), then the environment
+  oauth.py        per-user Onshape sign-in (D-23): authorization code flow, signins.json
+  onshape.py      httpx client: part name, document name, STL export
+  orientation.py  rotate a binary STL and drop it onto Z = 0 (D-14)
+  settings.py     validated print settings and their Bambu Studio process overrides
   printing.py     the print path: plan (read-only) → export, orient → slicer → target
+  jobs.py         background print jobs and single-use CSRF tokens
   bambuddy.py     BamBuddy REST client (used by modules/bambuddy.py)
   filaments.py    AMS slots / external spools, preset matching, sliced-nozzle check
   threemf.py      Bambu-style 3MF writer and project-settings transplant
+  files.py        naming, sanitizing, pruning
+  slicers.py      argv building + detached launch (the desktop hand-off)
+  notify.py       desktop notifications
+  logsetup.py     rotating file log, state dir
+  errors.py       exceptions with a message, a fix, an exit code and an HTTP status
+  static/         panel.js, preview.js, auth.js, vendored three.js
   modules/        slicer and target modules (docs/MODULES.md, D-27)
     base.py           the contract: ModuleSpec, PrinterInfo, Material, SliceInput, protocols
     registry.py       kind → class, spec_for, Modules (the configured modules of a process)
     bambuddy.py       BamBuddy: slicer + target (role "both")
+    slicerapi.py      Bambu Studio / OrcaSlicer API sidecars (bambu-studio-api, orca-slicer-api)
+    moonraker.py      Klipper through Moonraker (target)
+    prusalink.py      Prusa printers through PrusaLink (target)
     bambu_project.py  Bambu/Orca project layout (centring, copies, filaments, prime tower)
-  platform/
-    __init__.py   picks the implementation by sys.platform
-    linux.py      systemd user unit install/uninstall/status
-tests/
-scripts/          spikes, one-offs
+addon/            Home Assistant add-ons: os2slice, bambustudio_web
+docker/           Docker Compose settings examples and the Duck DNS script
+tests/            unit tests; fakes*.py are recorded HTTP shapes
+scripts/          deploy_addon.sh, spikes, one-offs
 ```
 
-`request.py` takes a mapping of query params, not a URL of a particular transport. The HTTP listener, `os2slice handle <url>` (accepts `http://localhost:…/open?…` and, for a future option A, `os2slice://open?…`) and `send` all feed the same parser, so adding a custom-scheme handler later touches only `cli.py` and `platform/`.
+`request.py` takes a mapping of query params, not a URL of a particular transport. `os2slice handle <url>` (accepts `http://localhost:…/open?…` and, for a future option A, `os2slice://open?…`) and `send` feed the same parser, so a listener or a custom-scheme handler touches only `cli.py`/`server.py` and a small OS-specific install step.
+
 
 ## ExportRequest
 
 ```python
 @dataclass(frozen=True)
 class ExportRequest:
-    slicer: str  # key into config [slicers.*]
+    slicer: str  # local mode: a [slicers.*] key; print path: always "bambuddy", unused
     document_id: str
     wvm: Literal["w", "v", "m"]
     wvm_id: str
@@ -98,7 +134,7 @@ class ExportRequest:
 
 ## Validation rules (the security boundary)
 
-The param rules apply to both modes. The first HTTP-layer table below is for the local-slicer listener. The print service (`server.py`) enforces:
+The param rules apply to both modes. The print service (`server.py`, with `admin.py` for `/admin`) enforces:
 
 | Check | Rule |
 |---|---|
@@ -107,6 +143,7 @@ The param rules apply to both modes. The first HTTP-layer table below is for the
 | identity | `"lan"`: anyone on the LAN (D-17). `"tailscale"`: `Tailscale-User-Login` must be in `server.allowed_users`. `"none"`: refused by config unless every host is localhost |
 | `GET /print` | `Sec-Fetch-Dest: document`; validates the Onshape params (`parse_print_query`: no `slicer`, Onshape's own params allowed). Reads only: part/document names, printers + status. Issues a CSRF token bound to user + part + configuration |
 | `POST /print` | `application/x-www-form-urlencoded` ≤ 16 KB, only known fields, `Sec-Fetch-Site: same-origin`, matching `Origin`. Settings and orientation are validated first, then the single-use token (30 min) is redeemed, then a job starts |
+| `GET /panel` | `Sec-Fetch-Dest: iframe` only; a `server` param other than the configured Onshape host is refused; same Onshape param rules as `/print`. `POST /panel/print` follows the `POST /print` rules. `POST /panel/model-link` and `/panel/web-studio` slice but never queue: same-origin form POSTs, no token; a model link (`/models/<token>/os2slice.3mf`) is a random token that expires after 15 min |
 | `/jobs/<id>` | random 128-bit id, visible only to the user who started it; refreshes itself while running |
 | sign-in (D-23) | Only with `[onshape] auth = "oauth"` (needs `identity = "lan"` + TLS). `GET /auth/start` and `/auth/callback`: `Sec-Fetch-Dest: document` only; `state` single use, 10 min, bound to a nonce cookie (`Path=/auth/`) from the same browser; the `next` page must be `/print?…` or `/panel?…`. `POST /auth/claim` and `/auth/sign-out`: same-origin form POSTs; claim codes single use, 2 min. Session cookies: random 256-bit ids, `Secure; HttpOnly`, `SameSite=Lax` (top-level) or `SameSite=None; Partitioned` (panel), 30 days; stored server-side as hashes. Tokens: `signins.json`, 0600, never logged or sent to browsers. Onshape is read with the signed-in user's token; not signed in → the panel/page shows Sign in, other routes 401 |
 | `/admin` (D-28) | The config page (`admin.py`). Host/identity checked first as above. No admin password set (`os2slice admin-password`, never from a browser) → 503 on every `/admin` path. Unknown path → 404, wrong method → 405 |
@@ -114,11 +151,11 @@ The param rules apply to both modes. The first HTTP-layer table below is for the
 | `/admin/login` | `GET`: the form (signed in → 303 `/admin`). `POST`: CSRF token, then the per-peer rate limit (5 failures → 30 s lockout, doubling to 15 min; 20 from anyone → global; 429 + `Retry-After`), then a constant-time scrypt check (401 when wrong). Success: cookie `os2slice_admin` = random 256-bit token, `Path=/admin; Max-Age=43200; HttpOnly; SameSite=Strict`, plus `Secure` with TLS or `identity = "lan"`; kept in memory as a hash, 12 h, ends on restart and on a password change |
 | `/admin/*` | Every other route needs the session, else 303 → `/admin/login`. GETs only read (they may call modules' `check()`, `profiles()`, `printers()`); query params are whitelisted per route. `POST /admin/logout` revokes the session; `POST /admin/password` needs the current password (rate-limited like login) and only rotates it |
 | `/admin` saves | Raw TOML → the edit → `config.parse` (same rules as at start; error → the form again, 400, nothing written) → a trial module build with the new secrets (a missing required secret fails here) → secrets to the secret store (never config.toml, never shown again: pages say "set"/"not set") → atomic write (`tomlwrite`, file mode kept) → `Service.reload()`. Reload swaps config and modules under a lock and closes the old modules unless a job is running; `[server]` and `[onshape]` settings and new Onshape keys apply after a restart, and every page says so. "Test connection" builds one module from the form and runs `check()` without saving |
-| responses | CSP `default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'`, `nosniff`, `no-referrer`, `no-store`. Every interpolated value is HTML-escaped |
+| responses | CSP `default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; base-uri 'none'` plus `frame-ancestors 'none'` (the panel and the job pages it opens: the configured Onshape host) and, on pages with scripts, `script-src 'self'; connect-src 'self'`; `nosniff`, `Referrer-Policy: same-origin` (with `no-referrer` browsers send `Origin: null` on our own POSTs), `no-store`. Every interpolated value is HTML-escaped |
 
-Any web page can navigate a browser to `http://localhost:8765/open?…`, so every request is hostile until proven otherwise.
+Any web page can navigate a browser to the service, so every request is hostile until proven otherwise.
 
-### HTTP layer (`server.py`)
+### HTTP layer of the local listener (D-3, D-9; not wired up in this tree)
 
 | Check | Rule |
 |---|---|
@@ -152,9 +189,9 @@ Also:
 - Slicer argv comes only from config. The only thing interpolated is the file path we created.
 - Worst case for a malicious link: it opens one of your own parts in your slicer. Keep it that way.
 
-## Service (Linux, local mode)
+## Service (Linux, local mode; planned)
 
-`os2slice install-service` writes `~/.config/systemd/user/os2slice.service`:
+The planned `os2slice install-service` (not a subcommand yet) writes `~/.config/systemd/user/os2slice.service`:
 
 ```ini
 [Unit]
@@ -174,10 +211,10 @@ then runs `systemctl --user daemon-reload` and `systemctl --user enable --now os
 
 ## Failure handling
 
-The service has no terminal, so every error path in `/open` must do all of these:
+Neither the service nor a launched `handle` has a terminal, so every failure must reach the person who asked:
 
-1. Write the traceback to the log.
-2. Send a notification with a one-line cause and the fix, e.g. "No API keys; run `os2slice setup-keys`" or "OrcaSlicer not found at /opt/…; edit config.toml".
-3. Return the same message in the HTML result page (with a non-200 status).
+1. Write it to the log (tracebacks for the unexpected ones).
+2. Local mode (`send`, `handle`, `pipeline.run_and_report`): send a notification with a one-line cause and the fix, e.g. "No API keys; run `os2slice setup-keys`" or "OrcaSlicer not found at /opt/…; edit config.toml".
+3. Service: show the same message and fix on the page, the panel or the `/jobs/<id>` page, with a non-200 status for a refused request. A module failure carries the service's own reason (`ModuleError`).
 
-CLI exit codes (`handle`, `send`, `print`): 0 ok, 1 config/unexpected, 2 bad request, 3 auth, 4 Onshape API error, 5 slicer launch error, 6 BamBuddy error. `/open` maps them to HTTP status: bad request 400, auth 500, Onshape API error 502, slicer launch error 500.
+Every error is an `Os2sliceError` with a message, a fix, a CLI exit code and an HTTP status (`errors.py`, `modules/base.py`). CLI exit codes (`handle`, `send`, `print`): 0 ok, 1 config/unexpected, 2 bad request, 3 auth (Onshape keys, or a module's 401/403: `ModuleAuthError`), 4 Onshape API error, 5 slicer launch error, 6 module error (any slicer or target module, BamBuddy included). HTTP: bad request 400, no access 403, config/auth/launch 500, Onshape API and module errors 502.
