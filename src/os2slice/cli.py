@@ -515,7 +515,7 @@ def check_module_secrets(cfg: config.Config, add: Add) -> bool:
                 add(PASS if ok else WARN, name, f"from the {_secret_source(source)}")
             elif f.required:
                 missing = True
-                add(FAIL, name, "not in the keyring or the environment; run `os2slice "
+                add(FAIL, name, "not in the secret store or the environment; run `os2slice "
                     + ("setup-keys --bambuddy`" if name == auth.BAMBUDDY_SECRET
                        else f"setup-keys --secret {name}`"))  # fmt: skip
     return missing
