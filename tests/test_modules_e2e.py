@@ -342,3 +342,73 @@ def test_unreachable_printer_plans_as_offline(tmp_path: Path, onshape: OnshapeCl
         False,
         False,
     )
+
+
+# -- doctor ---------------------------------------------------------------------------
+
+DOCTOR_TOML = f"""
+[slicers.studio]
+kind = "bambu-studio-api"
+url = "http://studio.test:3001"
+
+[slicers.orca-api]
+kind = "orca-slicer-api"
+url = "http://orca.test:3003"
+
+[targets.voron]
+kind = "moonraker"
+url = "{MOONRAKER_URL}"
+
+[targets.mk4]
+kind = "prusalink"
+url = "{PRUSALINK_URL}"
+
+[printers.voron]
+target = "voron"
+slicer = "orca-api"
+profiles = {{ printer = "Voron", process = "0.20mm", filament = "PLA" }}
+
+[printers.MK4]
+target = "mk4"
+slicer = "studio"
+"""
+
+
+def test_doctor_renders_a_row_per_new_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import functools
+
+    from os2slice import cli
+    from os2slice.config import config_path
+
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'[export]\ndir = "{tmp_path / "exports"}"\n' + DOCTOR_TOML)
+    monkeypatch.setenv("OS2SLICE_SECRET_TARGETS_MK4_API_KEY", "wrong-key")
+    real = Modules.from_config.__func__  # type: ignore[attr-defined]
+    transports = {
+        "studio": FakeSidecar("resolver").transport(),  # the add-on's real "unhealthy" 503
+        "orca-api": FakeSidecar("afk").transport(),
+        "voron": httpx.MockTransport(FakeMoonraker()),
+        "mk4": httpx.MockTransport(FakePrusaLink()),  # refuses "wrong-key"
+    }
+    monkeypatch.setattr(
+        Modules, "from_config", classmethod(functools.partial(real, transports=transports))
+    )
+    assert cli.main(["doctor"]) == 1  # the refused PrusaLink key (and no Onshape keys)
+    rows = capsys.readouterr().out.splitlines()
+
+    def row(status: str, check: str) -> str:
+        hits = [r for r in rows if re.match(rf"{status}  {re.escape(check)}\s", r)]
+        assert hits, f"no {status} row for {check!r} in:\n" + "\n".join(rows)
+        return hits[0]
+
+    assert "Moonraker v0.9.3-12-gabcdef0, Klipper v0.12.0" in row("PASS", "target voron")
+    assert "PrusaLink refused the API key" in row("FAIL", "target mk4")
+    assert "targets.mk4.api_key" in row("FAIL", "target mk4")
+    assert "OrcaSlicer API sidecar healthy, slicer 2.4.2" in row("PASS", "slicer orca-api")
+    assert "Bambu Studio API sidecar healthy" in row("PASS", "slicer studio")
+    assert "dataPath" in row("WARN", "slicer studio")
+    assert not any(re.match(r"WARN  (target voron|target mk4|slicer orca-api)\s", r) for r in rows)
+    assert "wrong-key" not in "\n".join(rows)
