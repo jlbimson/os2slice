@@ -148,7 +148,10 @@ until an admin password is set on the server (`os2slice admin-password`), then:
 Saves are validated by `config.parse` before anything is written, the file is
 rewritten whole (comments are not kept), and the service reloads its modules at once;
 server and Onshape settings wait for a restart. In the Home Assistant add-on the file
-is regenerated from the add-on options at every start, so page edits last until then.
+is written from the add-on options only on the first start, when those options change,
+or with `reset_config` on, so page edits persist across restarts until then; secrets
+saved on the page go to `secrets.json` in the state dir (no keyring there), and a
+filled-in secret option replaces its page value at each start (D-32).
 
 ## What the core does with a printer
 

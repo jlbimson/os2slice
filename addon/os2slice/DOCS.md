@@ -8,7 +8,7 @@ Print Onshape parts through BamBuddy from inside Onshape: pick the part, the fac
 |---|---|
 | `onshape_auth` | `oauth`: each user signs in with Onshape (recommended). `keys`: the service reads Onshape with one API key pair |
 | `onshape_oauth_client_id` / `onshape_oauth_client_secret` | From the os2slice OAuth app's **Keys and secret** tab (`oauth` mode); see `docs/ONSHAPE_SETUP.md` |
-| `onshape_access_key` / `onshape_secret_key` | A **read-only** Onshape API key pair (`keys` mode only) |
+| `onshape_access_key` / `onshape_secret_key` | A **read-only** Onshape API key pair (`keys` mode only); fill in both or neither |
 | `bambuddy_api_key` | A BamBuddy API key with only *read status*, *library* and *queue* (any value if BamBuddy auth is off) |
 | `bambuddy_url` | How this add-on reaches BamBuddy; `http://172.30.32.1:8000` is the Home Assistant host |
 | `bambuddy_public_url` | BamBuddy as browsers reach it, for the panel's links (default: this host, port 8000) |
@@ -18,9 +18,27 @@ Print Onshape parts through BamBuddy from inside Onshape: pick the part, the fac
 | `walls`, `infill`, `supports`, `build_plate_only`, `top_layers`, `bottom_layers`, `brim`, `copies` | Starting values shown on the print page |
 | `default_plate` | Build plate used unless a print or a preset's `bed_type` says otherwise. `High Temp Plate` is Bambu's name for smooth PEI |
 | `manual_start` | Keep `true`: queued jobs wait for Start in BamBuddy |
+| `admin_password` | Turns on the config page `/admin` (at least 12 characters); see below |
+| `reset_config` | Leave off. On: the next start writes `config.toml` again from these options, discarding edits made on `/admin`; turn it off again afterwards |
 
 The HTTPS certificate is the Duck DNS add-on's `/ssl/fullchain.pem` + `/ssl/privkey.pem` (override with `certfile`/`keyfile`). It is reloaded automatically after renewal.
 
 Sign-in tokens are kept in this add-on's private data (`/data/state/os2slice/signins.json`, readable only by the service).
 
 The log starts with a pass/fail table from `os2slice doctor`.
+
+## The config page `/admin`
+
+The service has a config page for printers and slicers (modules), print defaults, the Onshape and server settings, secrets, `doctor`, jobs and the log, at `https://<host>:8443/admin` (the first of `hosts`, e.g. `https://print.example.duckdns.org:8443/admin`).
+
+**Password.** The page is off until you set `admin_password` on the Configuration tab and restart the add-on. The add-on stores only a hash of it (`/data/state/os2slice/admin.json`); the password is never logged. A restart with the same password keeps everyone signed in; a new one signs every admin session out. Clearing the option later doesn't turn the page off: the stored password keeps working (delete `admin.json` to remove it). A password shorter than 12 characters stops the add-on with an error saying so. There is no way to set the password from a browser.
+
+**What persists.** `config.toml` (`/data/os2slice/config.toml`) is written from the options on the first start and whenever the options it is built from change (or a new add-on version builds it differently); otherwise it is kept as it is, so edits made on `/admin` persist across restarts. Changing any of those options on the Configuration tab replaces the file, and with it the page's edits, so after you start using `/admin` treat the page as the place for settings. `reset_config` forces that rewrite once. Settings on the page's Server and Onshape sections need a restart; everything else applies at once.
+
+**Secrets.** Secrets saved on the page go to `/data/state/os2slice/secrets.json` (readable only by the service), never into `config.toml`. Which one is used:
+
+1. A secret option filled in on the Configuration tab (`bambuddy_api_key`, the Onshape keys, the OAuth client secret) always wins: at each start it replaces the same secret saved on the page. A value saved on the page while the option is filled in is used only until the next start.
+2. When that option is empty, the secret saved on the page is used. So to manage a secret from the page, clear its option.
+3. Secrets of other modules (e.g. a Moonraker or PrusaLink printer's API key) have no option; they live only on the page.
+
+A secret the add-on needs (the BamBuddy key, and the Onshape keys or OAuth client secret for the chosen `onshape_auth`) must be in one of the two places, or the add-on doesn't start and says which option to fill in.

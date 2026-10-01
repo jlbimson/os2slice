@@ -1,8 +1,8 @@
 # Home Assistant local add-on (deployed to /local_apps/os2slice by scripts/deploy_addon.sh).
 name: os2slice
-version: "0.1.0"
+version: "0.2.0"
 slug: os2slice
-description: Print Onshape parts through BamBuddy, with orientation and settings (LAN only)
+description: Print Onshape parts through BamBuddy, with orientation and settings, and a config page at /admin (LAN only)
 arch:
   - amd64
 startup: application
@@ -55,13 +55,18 @@ options:
       process: "0.20mm Standard @BBL H2D"
       filament: "Bambu PLA Basic @BBL H2D"
   log_level: "info"
+  # The config page https://<host>:8443/admin stays off until this is set (12+ characters).
+  admin_password: ""
+  # On: write config.toml again from these options at the next start, discarding edits
+  # made on /admin. Turn it off again afterwards.
+  reset_config: false
 schema:
   onshape_auth: list(keys|oauth)?
   onshape_access_key: password?
   onshape_secret_key: password?
   onshape_oauth_client_id: str?
   onshape_oauth_client_secret: password?
-  bambuddy_api_key: password
+  bambuddy_api_key: password?
   bambuddy_url: url
   bambuddy_public_url: url?
   web_studio_url: url?
@@ -88,3 +93,5 @@ schema:
   certfile: str?
   keyfile: str?
   log_level: list(info|debug)
+  admin_password: password?
+  reset_config: bool?
