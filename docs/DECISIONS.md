@@ -127,3 +127,21 @@ rate-limiting, and secrets that are write-only. Config writes are atomic
 (`config.toml.tmp` → rename) through a small TOML emitter for our own schema (no new
 dependency), the service reloads its config after a save, and settings that need a
 restart (bind, port, TLS) say so on the page.
+
+## D-29: The module seam, as built (Phase 9a, 2026-10-01)
+
+Calls made while moving the BamBuddy path onto the D-27 modules, keeping behaviour:
+- A role-"both" module is configured once under `[targets.<key>]`; it is also slicer
+  `<key>`, and an empty `slicer` means the target slices for itself.
+- Discovered printers are keyed `<target>/<id>`; forms send that key, the CLI and
+  `default_printer` take a key or a name. Material ids are strings
+  (`[A-Za-z0-9_.-]{1,40}`); an id the printer doesn't have fails the job (before any
+  upload) rather than the form, since only the target can tell.
+- `BambuddyError` is a `ModuleError`. BamBuddy's slice always downloads the sliced file
+  (`SliceOutput.data`); `submit` queues the library file the slice made instead of
+  uploading again, and uploads a file sliced elsewhere into the library root folder.
+- The preset `source` tier is BamBuddy-specific: it lives in the model's `extra`
+  (`preset_source`), not in `Profiles`.
+- A desktop hand-off can't be a printer's slicer (config error); the MODULES.md example
+  that did so now uses a server-side slicer key.
+- `cfg.bambuddy` is gone; `[bambuddy]` is only read as `[targets.bambuddy]`.
