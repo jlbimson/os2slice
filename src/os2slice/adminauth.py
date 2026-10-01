@@ -94,6 +94,11 @@ def _check_rules(password: object) -> str:
     return pw
 
 
+def check_rules(password: object) -> None:
+    """Raise `PasswordError` when `password` breaks the rules (for the add-on's option)."""
+    _check_rules(password)
+
+
 def _scrypt(password: str, salt: bytes, n: int, r: int, p: int, dklen: int) -> bytes:
     return hashlib.scrypt(
         password.encode("utf-8"), salt=salt, n=n, r=r, p=p, dklen=dklen, maxmem=_SCRYPT_MAXMEM
@@ -352,5 +357,6 @@ __all__ = [
     "AdminStore",
     "PasswordError",
     "admin_path",
+    "check_rules",
     "set_password_interactive",
 ]

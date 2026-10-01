@@ -334,9 +334,11 @@ def _chrome(ctx: Ctx, here: str) -> str:
     notes = "".join(f'<div class="msg">{_e(n)}</div>' for n in _restart_notes(ctx.svc))
     if _addon():
         notes += (
-            '<div class="msg">Running as the Home Assistant add-on: config.toml is written '
-            "again from the add-on's Configuration tab at every start, so changes made here "
-            "last until the next restart, and secrets come from that tab too.</div>"
+            '<div class="msg">Running as the Home Assistant add-on: changes made here '
+            "persist across restarts until the options on the add-on's Configuration tab "
+            "change (or reset_config is on); then config.toml is written again from them. "
+            "Secrets saved here are used while the matching option on that tab is empty; "
+            "a filled-in option replaces them at the next start.</div>"
         )
     return (
         f'{CSS}<nav class="admin">{links} {logout}</nav>'

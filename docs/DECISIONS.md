@@ -193,3 +193,27 @@ Calls made building `/admin` (D-28):
   `Origin` equal to the Host (older browsers), never with neither.
 - Module and printer names can't be renamed on the page (secrets are stored under the
   name); remove and add instead. The file is rewritten whole, without its comments.
+
+## D-32: The add-on and the config page (add-on 0.2.0, 2026-10-01)
+
+Making `/admin` work inside the Home Assistant add-on (D-12, D-28):
+- **`admin_password` option** (`password?`, 12+ characters, else an options error).
+  Hashed into `admin.json` only when `verify()` says it changed, so a restart keeps the
+  admin signed in. An empty option leaves a stored password alone: clearing a field on
+  the Configuration tab is too easy to do by accident to be the way to lock the page.
+- **`config.toml` persists.** It is written from the options only when there is none,
+  when the sha256 of the rendered text differs from `options.sha256` beside it, or with
+  `reset_config` on. Hashing the *rendered* text (not the options) means an add-on
+  upgrade that renders differently also rewrites it; the cost is that such an upgrade
+  discards page edits (DOCS.md says so). `render_config` still emits the
+  legacy `[bambuddy]` table; the page's Migrate button converts it.
+- **Secret file.** No keyring in the container, so with `OS2SLICE_ADDON=1` or a null /
+  fail keyring backend secrets are saved in `<state dir>/secrets.json` (0600, atomic).
+  Lookup: keyring (when usable) → file → environment. A keyring that exists but refuses
+  stays an error on a desktop (no silent plain-file fallback).
+- **Options win over the page.** The file comes before the environment, so an empty
+  option lets the page's value through; a filled-in option is exported to the
+  environment *and* its entries are deleted from the file at each start. A page save
+  while the option is filled in therefore works until the next start. Secret options
+  are no longer required when the file holds that secret (the Onshape key pair counts
+  as one: both options or neither).
