@@ -8,6 +8,7 @@ through `spec_for`; nothing else needs to know the kind.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -92,13 +93,22 @@ def resolve_secrets(
     return out
 
 
+def _construct(
+    cls: type[Any], values: Mapping[str, Any], key: str, transport: httpx.BaseTransport | None
+) -> Any:
+    """`cls(values, key=..., transport=...)`; `key` only for classes that take it."""
+    if "key" in inspect.signature(cls).parameters:
+        return cls(values, key=key, transport=transport)
+    return cls(values, transport=transport)
+
+
 def build_slicer(
     kind: str, values: Mapping[str, Any], *, key: str, transport: httpx.BaseTransport | None = None
 ) -> Slicer:
     """A slicer module from validated values (secrets resolved)."""
     if kind not in SLICERS:
         raise ConfigError(f"{kind!r} isn't a slicer module")
-    return SLICERS[kind](values, key=key, transport=transport)  # type: ignore[no-any-return]
+    return _construct(SLICERS[kind], values, key, transport)  # type: ignore[no-any-return]
 
 
 def build_target(
@@ -107,7 +117,7 @@ def build_target(
     """A target module from validated values (secrets resolved)."""
     if kind not in TARGETS:
         raise ConfigError(f"{kind!r} isn't a target module")
-    return TARGETS[kind](values, key=key, transport=transport)  # type: ignore[no-any-return]
+    return _construct(TARGETS[kind], values, key, transport)  # type: ignore[no-any-return]
 
 
 def configured_printer(p: PrinterConfig, technology: str) -> PrinterInfo:
@@ -231,8 +241,8 @@ class Modules:
         """(label, url) of each target's own UI that has one, for the panel and job pages."""
         links = []
         for target in self.targets.values():
-            ui = getattr(target, "ui_url", None)
-            url = ui(request_host) if callable(ui) else ""
+            ui = getattr(target, "ui_url", None)  # a method, or a plain configured URL
+            url = ui(request_host) if callable(ui) else str(ui or "")
             if url:
                 links.append((target.spec.label, url))
         return links

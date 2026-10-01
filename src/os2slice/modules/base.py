@@ -269,8 +269,10 @@ def distinct_materials(parts: tuple[PartGeometry, ...]) -> tuple[Material, ...]:
 
 # factory(values: Mapping[str, Any], *, key: str, transport=None) -> module. `values` are
 # the validated config fields with secrets resolved (None when unset), plus "models"
-# for targets; `key` is the module's [slicers.<key>] / [targets.<key>] name.
+# for targets; `key` (passed only to constructors that take it) is the module's
+# [slicers.<key>] / [targets.<key>] name.
 #
-# Optional on a target: `ui_url(request_host: str = "") -> str`, the page where a person
-# watches the queue, for links that don't belong to one printer (the panel, job pages).
+# Optional on a target: `ui_url`, a method `(request_host: str = "") -> str` or a plain
+# str attribute: the page where a person watches the queue, for links that belong to no
+# single printer (the panel, job pages).
 Factory = Callable[..., Any]

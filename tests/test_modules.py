@@ -77,6 +77,21 @@ def test_registry_and_specs() -> None:
         registry.build_slicer("desktop", {}, key="x")
 
 
+def test_builders_pass_key_only_to_modules_that_take_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Plain:  # like Moonraker / PrusaLink: (values, *, transport)
+        spec = registry.spec_for("bambuddy")
+        ui_url = "http://mainsail.lan"
+
+        def __init__(self, values, *, transport=None):  # type: ignore[no-untyped-def]
+            self.values = values
+
+    monkeypatch.setitem(registry.TARGETS, "plain", Plain)
+    t = registry.build_target("plain", {"url": "http://x"}, key="voron")
+    assert isinstance(t, Plain) and t.values == {"url": "http://x"}
+    mods = registry.Modules(targets={"voron": t})
+    assert mods.ui_links("host") == [("BamBuddy", "http://mainsail.lan")]  # a plain str works
+
+
 def test_secrets_are_resolved_by_name_and_required() -> None:
     spec = registry.spec_for("bambuddy")
     asked: list[str] = []
