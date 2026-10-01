@@ -7,6 +7,8 @@ name = "os2slice"
 version = "0.1.0"
 description = "Slice and print Onshape parts on Bambu Lab printers through BamBuddy, from inside Onshape."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [{ name = "jlbimson" }]
 dependencies = [

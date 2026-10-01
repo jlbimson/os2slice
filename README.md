@@ -117,4 +117,6 @@ Design notes:
 - It serves HTTPS on the LAN only, and accepts requests only for the configured host names.
 - Don't expose ports 8443 or 3443 to the internet.
 
-Bundles [three.js](https://threejs.org) (MIT, `src/os2slice/static/vendor/`).
+## License
+
+[MIT](LICENSE). Bundles [three.js](https://threejs.org) (MIT, `src/os2slice/static/vendor/`).
