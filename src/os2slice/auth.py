@@ -139,6 +139,25 @@ def store_bambuddy_key(key: str) -> None:
     store_secret(BAMBUDDY_SECRET, key)
 
 
+def store_oauth_client_secret(secret: str) -> None:
+    """Save the OAuth app's client secret in the system keyring (D-23)."""
+    try:
+        keyring.set_password(SERVICE, OAUTH_SECRET_ENTRY, secret)
+    except keyring.errors.KeyringError as e:
+        raise AuthError(
+            f"Couldn't save the OAuth client secret to the system keyring ({type(e).__name__})",
+            "Make sure KDE Wallet or GNOME Keyring is running and unlocked",
+        ) from e
+
+
+def has_oauth_client_secret() -> bool:
+    try:
+        load_oauth_client_secret()
+    except AuthError:
+        return False
+    return True
+
+
 def load_oauth_client_secret() -> str:
     """The OAuth app's client secret (D-23). Keyring first, then $ONSHAPE_OAUTH_CLIENT_SECRET."""
     try:
