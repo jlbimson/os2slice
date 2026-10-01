@@ -146,6 +146,7 @@ class SliceInput:
     auto_orient: bool = False  # the user asked the slicer to orient (else parts are final)
     auto_arrange: bool = False
     bed_type: str | None = None  # Bambu plate name, when the module understands it
+    media: Media | None = None  # what the target accepts; None = the slicer's default
     extra: Mapping[str, Any] = field(default_factory=dict)
 
 
