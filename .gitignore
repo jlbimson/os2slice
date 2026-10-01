@@ -27,3 +27,4 @@ docs/PLAN.md
 # Docker Compose: local settings, secrets and certificates
 /docker/config.toml
 /certs/
+.claude/worktrees/

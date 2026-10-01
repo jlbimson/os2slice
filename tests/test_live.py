@@ -47,24 +47,21 @@ def test_keyring_is_reachable() -> None:
 def test_live_bambuddy_slice_only(real_keys: auth.Keys) -> None:
     """Export → orient → upload → slice in the real BamBuddy. Never queues a print."""
     from os2slice import config, printing
-    from os2slice.bambuddy import BambuddyClient
+    from os2slice.modules.registry import Modules
     from os2slice.orientation import Orientation
     from os2slice.settings import PrintSettings
 
     cfg = config.load(create=False)
-    if cfg.bambuddy is None:
-        pytest.skip("no [bambuddy] in config")
-    key, _ = auth.load_bambuddy_key()
-    with (
-        OnshapeClient(cfg.onshape_base_url, real_keys) as onshape,
-        BambuddyClient(cfg.bambuddy.base_url, key) as bb,
-    ):
+    if "bambuddy" not in cfg.targets:
+        pytest.skip("no [bambuddy] / [targets.bambuddy] in config")
+    modules = Modules.from_config(cfg)
+    with OnshapeClient(cfg.onshape_base_url, real_keys) as onshape:
         req = parse_onshape_url(LIVE_URL, "bambuddy", ["bambuddy"], None)
         part_id = os.environ.get("OS2SLICE_LIVE_PART") or onshape.list_parts(req)[0]["partId"]
         req = parse_onshape_url(LIVE_URL, "bambuddy", ["bambuddy"], part_id)
         plan = printing.plan_print(
-            req, cfg, onshape, bb, None, Orientation.parse("x+"), PrintSettings(3, 20, "tree")
+            req, cfg, onshape, modules, None, Orientation.parse("x+"), PrintSettings(3, 20, "tree")
         )
-        out = printing.execute_print(plan, cfg, onshape, bb, queue=False)
+        out = printing.execute_print(plan, cfg, onshape, modules, queue=False)
     assert not out.queued
-    assert out.slice.library_file_id > 0
+    assert out.slice.report["library_file_id"] > 0

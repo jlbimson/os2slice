@@ -16,9 +16,9 @@ import httpx
 import pytest
 
 from os2slice import server
-from os2slice.bambuddy import BambuddyClient
 from os2slice.config import Config
 from os2slice.errors import AuthError
+from os2slice.modules.registry import Modules
 from os2slice.oauth import (
     BearerAuth,
     Grant,
@@ -29,7 +29,7 @@ from os2slice.oauth import (
 )
 from os2slice.onshape import OnshapeClient
 from tests.conftest import DOC, ELEM, WS
-from tests.fakes import FakeBambuddy, fake_onshape
+from tests.fakes import FakeBambuddy, fake_modules, fake_onshape
 
 HOST = "localhost:8765"
 NAV = {"Host": HOST, "Sec-Fetch-Dest": "document", "Sec-Fetch-Site": "cross-site"}
@@ -127,7 +127,7 @@ def test_tokens_refresh_before_expiry_and_rotate(tmp_path: Path) -> None:
     assert store.grant("a" * 24).refresh_token == "RT-A2"  # type: ignore[union-attr]
 
 
-def test_refused_refresh_forgets_the_user(tmp_path: Path) -> None:
+def test_refused_refresh_forgets_the_user(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     oauth = FakeOAuth()
     oauth.refuse_refresh = True
     store = GrantStore(tmp_path / "s.json")
@@ -137,6 +137,9 @@ def test_refused_refresh_forgets_the_user(tmp_path: Path) -> None:
     with pytest.raises(AuthError, match="refused"):
         tokens.access_token("a" * 24)
     assert store.grant("a" * 24) is None and store.session_user(sid) is None
+    # The log says why (revoked vs wrong client), without the secret or the token.
+    assert "refused refresh_token (400): invalid_grant" in caplog.text
+    assert "client-secret" not in caplog.text and "RT-A" not in caplog.text
 
 
 def test_bearer_retries_once_after_a_401() -> None:
@@ -184,9 +187,7 @@ class SignedInServer:
         self.svc = server.Service(
             cfg,
             onshape=no_keys,
-            bambuddy=lambda: BambuddyClient(
-                "http://bb.test", "k", transport=httpx.MockTransport(self.fake)
-            ),
+            modules=fake_modules(cfg, self.fake),
             signin=signin,
         )
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(self.svc))
@@ -227,6 +228,17 @@ def test_panel_asks_to_sign_in_first(signed: SignedInServer) -> None:
     r = signed.http.get(PANEL, headers=FRAME)
     assert r.status_code == 200 and 'id="signin-button"' in r.text
     assert "/static/auth.js?v=" in r.text and signed.seen == []  # nothing read from Onshape
+
+
+def test_revoked_sign_in_shows_the_sign_in_button(signed: SignedInServer) -> None:
+    # E.g. after the Onshape app moved to another owner: the saved refresh token is refused.
+    _, panel = signed.sign_in()
+    store = signed.svc.signin.store  # type: ignore[union-attr]
+    store.put_grant(dataclasses.replace(store.grant("a" * 24), expires_at=0))
+    signed.oauth.refuse_refresh = True
+    r = signed.http.get(PANEL, headers={**FRAME, "Cookie": f"os2s_p={panel}"})
+    assert r.status_code == 200 and 'id="signin-button"' in r.text, r.text
+    assert store.grant("a" * 24) is None  # forgotten, so a fresh sign-in starts clean
 
 
 def test_sign_in_flow_sets_both_cookies_and_reads_as_the_user(signed: SignedInServer) -> None:
@@ -372,7 +384,7 @@ def test_sign_out_ends_the_session_and_forgets_the_grant(signed: SignedInServer)
 
 
 def test_auth_routes_are_off_in_key_mode(cfg: Config) -> None:
-    svc = server.Service(cfg, onshape=lambda: None, bambuddy=lambda: None)  # type: ignore[arg-type,return-value]
+    svc = server.Service(cfg, onshape=lambda: None, modules=Modules())  # type: ignore[arg-type,return-value]
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(svc))
     threading.Thread(target=httpd.serve_forever, args=(0.01,), daemon=True).start()
     try:

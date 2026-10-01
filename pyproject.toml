@@ -29,6 +29,7 @@ packages = ["src/os2slice"]
 
 [tool.ruff]
 line-length = 100
+extend-exclude = [".claude"]  # agent worktrees
 target-version = "py310"
 
 [tool.ruff.lint]
@@ -39,6 +40,7 @@ ignore = ["S603"]  # subprocess with a list argv is the whole point; shell=True 
 "tests/**" = ["S101", "S104", "S105", "S106", "S108", "S501", "S603", "S607"]
 "scripts/**" = ["S", "T20"]
 "src/os2slice/server.py" = ["S608"]  # HTML templates trip the SQL heuristic; values go through html.escape
+"src/os2slice/admin.py" = ["S608"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import re
 import threading
 import time
@@ -12,12 +13,11 @@ import pytest
 
 from os2slice import server
 from os2slice.auth import Keys
-from os2slice.bambuddy import BambuddyClient
 from os2slice.config import Config, ServerConfig
 from os2slice.onshape import OnshapeClient
 from os2slice.settings import PrintSettings
 from tests.conftest import DOC, ELEM, QUERY_WITH_CONFIG, WS
-from tests.fakes import FakeBambuddy, fake_onshape, uploaded_zip
+from tests.fakes import FakeBambuddy, fake_modules, fake_onshape, uploaded_zip
 
 HOST = "localhost:8765"
 NAV = {
@@ -38,9 +38,7 @@ class Running:
                 Keys("a", "b"),
                 transport=httpx.MockTransport(fake_onshape),
             ),
-            bambuddy=lambda: BambuddyClient(
-                "http://bb.test", "k", transport=httpx.MockTransport(fake)
-            ),
+            modules=fake_modules(cfg, fake),
         )
         self.svc, self.fake = svc, fake
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(svc))
@@ -115,9 +113,11 @@ def test_full_print_flow(srv: Running) -> None:
 
 def test_token_is_single_use(srv: Running) -> None:
     _, form = srv.get_form()
-    assert srv.post({**form, **choices()}).status_code == 303
+    r = srv.post({**form, **choices()})
+    assert r.status_code == 303
     again = srv.post({**form, **choices()})
     assert again.status_code == 403 and "already used" in again.text
+    wait_job(srv, r.headers["Location"])
 
 
 def test_token_is_bound_to_the_part(srv: Running) -> None:
@@ -151,7 +151,9 @@ def test_bad_token_and_bad_fields(srv: Running) -> None:
     assert srv.post({**form, **choices(), "shell": "rm"}).status_code == 400
     assert srv.fake.queued == []
     # Validation errors don't burn the token: the same form still works.
-    assert srv.post({**form, **choices()}).status_code == 303
+    r = srv.post({**form, **choices()})
+    assert r.status_code == 303
+    wait_job(srv, r.headers["Location"])  # don't let the job outlive the test's log capture
 
 
 def test_get_needs_a_navigation(srv: Running) -> None:
@@ -430,20 +432,82 @@ def test_menu_lists_loaded_filament_and_preselects_it(srv: Running) -> None:
     assert '<optgroup label="A1 Mini (A1 Mini), idle">' in r.text
     # The A1 Mini's only loaded spool (external PETG) is chosen over the PLA preset.
     assert (
-        '<option value="A1 Mini|254" data-color="#000000" selected>'
+        '<option value="bambuddy/1|254" data-color="#000000" selected>'
         "A1 Mini · External: PETG · black</option>" in r.text
     )
-    assert '<option value="A1 Mini">A1 Mini · preset filament (Bambu PLA Basic)</option>' in r.text
+    assert (
+        '<option value="bambuddy/1">A1 Mini · preset filament (Bambu PLA Basic)</option>' in r.text
+    )
 
 
 def test_menu_posts_a_slot(srv: Running) -> None:
     _, form = srv.get_form()
-    r = srv.post({**form, **choices(printer="A1 Mini|254")})
+    r = srv.post({**form, **choices(printer="bambuddy/1|254")})
     assert r.status_code == 303
     page = wait_job(srv, r.headers["Location"])
     assert "External: PETG · black" in page.text
     assert srv.fake.queued[0]["use_ams"] is False
     assert srv.fake.slice_bodies[0]["filament_preset"]["id"] == "Generic PETG @BBL A1M"
+
+
+def test_panel_has_separate_printer_and_filament_menus(srv: Running) -> None:
+    r, _ = panel_form(srv)
+    assert '<label>Printer <select name="printer" required>' in r.text
+    assert '<option value="bambuddy/1" selected>A1 Mini (A1 Mini), idle</option>' in r.text
+    assert "|" not in re.search(r'<select name="printer".*?</select>', r.text, re.S).group(0)
+    # Filament options for the default printer, its loaded spool preselected...
+    menu = re.search(r'<select name="filament" data-choices="([^"]*)">(.*?)</select>', r.text, re.S)
+    assert menu, r.text
+    assert '<option value="254" data-color="#000000" selected>External: PETG · black</option>' in (
+        menu.group(2)
+    )
+    assert '<option value="">Preset filament (Bambu PLA Basic)</option>' in menu.group(2)
+    # ...and every printer's choices for panel.js to switch to.
+    choices_json = json.loads(menu.group(1).replace("&quot;", '"').replace("&#x27;", "'"))
+    assert set(choices_json) == {"bambuddy/1"}  # the only printer with presets here
+    assert [c["value"] for c in choices_json["bambuddy/1"]] == ["", "254"]
+    assert [c["default"] for c in choices_json["bambuddy/1"]] == [False, True]
+
+
+def test_panel_posts_printer_and_filament_separately(srv: Running) -> None:
+    _, form = panel_form(srv)
+    r = post_panel(srv, {**form, "p": "JHD", **choices(filament="254")})
+    assert r.status_code == 303, r.text
+    page = wait_job(srv, r.headers["Location"], headers=FRAME)
+    assert "External: PETG · black" in page.text
+    assert srv.fake.slice_bodies[0]["filament_preset"]["id"] == "Generic PETG @BBL A1M"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"filament": "x/y"},
+        {"filament": "1" * 41},
+        {"printer": "A1 Mini|254", "filament": "254"},
+        {"printer": "A" * 101},
+    ],
+)
+def test_panel_filament_refusals(srv: Running, bad: dict[str, str]) -> None:
+    _, form = panel_form(srv)
+    r = post_panel(srv, {**form, "p": "JHD", **choices(**bad)})
+    assert r.status_code == 400 and srv.fake.queued == []
+
+
+def test_unknown_material_fails_the_job_before_anything_is_uploaded(srv: Running) -> None:
+    _, form = panel_form(srv)
+    r = post_panel(srv, {**form, "p": "JHD", **choices(printer="bambuddy/1", filament="7")})
+    assert r.status_code == 303
+    page = wait_job(srv, r.headers["Location"], headers=FRAME)
+    assert "Nothing is loaded in slot 7 on A1 Mini" in page.text
+    assert srv.fake.uploads == [] and srv.fake.queued == []
+
+
+def test_panel_preset_filament_is_an_empty_choice(srv: Running) -> None:
+    _, form = panel_form(srv)
+    r = post_panel(srv, {**form, "p": "JHD", **choices(filament="")})
+    assert r.status_code == 303
+    wait_job(srv, r.headers["Location"], headers=FRAME)
+    assert srv.fake.slice_bodies[0]["filament_preset"]["id"] == "Bambu PLA Basic @BBL A1M"
 
 
 def test_plate_field(srv: Running) -> None:
@@ -491,7 +555,7 @@ def test_unchecked_box_beats_a_checked_default(cfg: Config) -> None:
 
 def test_panel_multi_material_post(srv: Running) -> None:
     _, form = panel_form(srv)
-    r = post_panel(srv, {**form, "p": "JHD", "extra": "JKD:254", **choices(printer="A1 Mini|254")})
+    r = post_panel(srv, {**form, "p": "JHD", "extra": "JKD:254", **choices(filament="254")})
     assert r.status_code == 303, r.text
     page = wait_job(srv, r.headers["Location"], headers=FRAME)
     assert "Queued ✓" in page.text and "2 parts, one object" in page.text
@@ -502,7 +566,7 @@ def test_panel_multi_material_post(srv: Running) -> None:
 
 
 @pytest.mark.parametrize(
-    "extra", ["JKD", "JKD:x", "../a:1", ",".join(f"P{i}:1" for i in range(20))]
+    "extra", ["JKD", "JKD:x/y", "../a:1", ",".join(f"P{i}:1" for i in range(20))]
 )
 def test_panel_rejects_bad_extra(srv: Running, extra: str) -> None:
     _, form = panel_form(srv)

@@ -14,6 +14,8 @@
   const shown = document.getElementById("selection");
   const extrasBox = document.getElementById("extras");
   const printer = form.elements.printer;
+  const filament = form.elements.filament;
+  const FILAMENTS = JSON.parse(filament.dataset.choices || "{}"); // printer -> menu entries
   const studio = document.getElementById("studio-link");
   const webStudio = document.getElementById("web-studio-link"); // absent if not set up
   const webState = document.getElementById("web-studio-state");
@@ -30,13 +32,33 @@
   post("applicationInit");
   setInterval(() => post("keepAlive"), 60000);
 
-  const printerName = () => printer.value.split("|")[0];
+  const printerName = () => printer.value;
   const nameOf = (id) => parts[id] || id;
 
-  // The loaded slots of the chosen printer, from the main menu's options.
+  // Refill the filament menu for the chosen printer: keep the choice if that printer
+  // has it too (e.g. the preset), else take the printer's default (a loaded slot of the
+  // configured material, a lone slot, or the preset).
+  function renderFilaments() {
+    const keep = filament.value;
+    const entries = FILAMENTS[printerName()] || [];
+    filament.replaceChildren();
+    for (const c of entries) {
+      const opt = document.createElement("option");
+      opt.value = c.value;
+      opt.textContent = c.label;
+      opt.disabled = Boolean(c.disabled);
+      if (c.color) opt.dataset.color = c.color;
+      filament.append(opt);
+    }
+    const usable = entries.filter((c) => !c.disabled);
+    const pick = usable.find((c) => c.value === keep && keep !== "")
+      || usable.find((c) => c.default) || usable[0];
+    if (pick) filament.value = pick.value;
+  }
+
+  // The loaded slots of the chosen printer (not the preset), for the extra parts' menus.
   function slotOptions() {
-    const prefix = `${printerName()}|`;
-    return [...printer.options].filter((o) => o.value.startsWith(prefix) && !o.disabled);
+    return [...filament.options].filter((o) => o.value !== "" && !o.disabled);
   }
 
   function renderExtras() {
@@ -50,8 +72,8 @@
       select.dataset.part = id;
       for (const o of options) {
         const opt = document.createElement("option");
-        opt.value = o.value.split("|")[1];
-        opt.textContent = o.textContent.replace(`${printerName()} · `, "");
+        opt.value = o.value;
+        opt.textContent = o.textContent;
         opt.dataset.color = o.dataset.color || "";
         select.append(opt);
       }
@@ -86,7 +108,7 @@
     else if (multi) {
       text = `${bodies.length} parts as one print: ${bodies.map(nameOf).join(", ")}`;
       if (face) text += `, face ${face} down`;
-      const everyPartHasSlot = printer.value.includes("|")
+      const everyPartHasSlot = filament.value !== ""
         && bodies.slice(1).every((id) => chosen[id]);
       if (!everyPartHasSlot) {
         text += ". Pick a loaded filament (not the preset) for every part.";
@@ -182,11 +204,14 @@
 
   // The preview takes each part's filament colour.
   const syncColor = () => {
-    const opt = printer.options[printer.selectedIndex];
+    const opt = filament.options[filament.selectedIndex];
     root.dataset.color = (opt && opt.dataset.color) || "";
     document.dispatchEvent(new CustomEvent("os2slice:color"));
   };
-  printer.addEventListener("change", () => { renderExtras(); syncColor(); sync(); });
+  printer.addEventListener("change", () => {
+    renderFilaments(); renderExtras(); syncColor(); sync();
+  });
+  filament.addEventListener("change", () => { syncColor(); sync(); });
   orient.addEventListener("change", () => { sync.userPicked = true; sync(); });
   // The Bambu Studio link carries the settings (copies, brim, ...): rebuild it on edits.
   const SETTINGS = ["walls", "infill", "supports", "build_plate_only", "top_layers",
@@ -194,6 +219,7 @@
   form.addEventListener("change", (ev) => {
     if (SETTINGS.includes(ev.target.name)) scheduleStudioLink(selectionOk);
   });
+  renderFilaments();
   syncColor();
 
   window.addEventListener("message", (ev) => {

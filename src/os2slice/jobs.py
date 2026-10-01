@@ -65,6 +65,17 @@ class JobStore:
             job = self._jobs.get(job_id)
         return job if job is not None and job.user == user else None
 
+    def recent(self, limit: int = 100) -> list[Job]:
+        """Every user's jobs, newest first (for the config page, D-28)."""
+        with self._lock:
+            jobs = list(self._jobs.values())
+        return jobs[::-1][:limit]
+
+    def busy(self) -> bool:
+        """True while a job is queued or running."""
+        with self._lock:
+            return any(not j.finished for j in self._jobs.values())
+
     def _run(self, job: Job, work: Work) -> None:
         with self._run_lock:
             job.state = "running"

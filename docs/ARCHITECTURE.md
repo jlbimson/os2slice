@@ -60,9 +60,18 @@ src/os2slice/
   auth.py         keyring + env fallback
   onshape.py      httpx client: part name, document name, STL export (later: translations)
   files.py        naming, sanitizing, pruning
-  slicers.py      argv building + detached launch
+  slicers.py      argv building + detached launch (the desktop hand-off)
   notify.py       desktop notifications
   logsetup.py     rotating file log
+  printing.py     the print path: plan (read-only) → export, orient → slicer → target
+  bambuddy.py     BamBuddy REST client (used by modules/bambuddy.py)
+  filaments.py    AMS slots / external spools, preset matching, sliced-nozzle check
+  threemf.py      Bambu-style 3MF writer and project-settings transplant
+  modules/        slicer and target modules (docs/MODULES.md, D-27)
+    base.py           the contract: ModuleSpec, PrinterInfo, Material, SliceInput, protocols
+    registry.py       kind → class, spec_for, Modules (the configured modules of a process)
+    bambuddy.py       BamBuddy: slicer + target (role "both")
+    bambu_project.py  Bambu/Orca project layout (centring, copies, filaments, prime tower)
   platform/
     __init__.py   picks the implementation by sys.platform
     linux.py      systemd user unit install/uninstall/status
@@ -100,6 +109,11 @@ The param rules apply to both modes. The first HTTP-layer table below is for the
 | `POST /print` | `application/x-www-form-urlencoded` ≤ 16 KB, only known fields, `Sec-Fetch-Site: same-origin`, matching `Origin`. Settings and orientation are validated first, then the single-use token (30 min) is redeemed, then a job starts |
 | `/jobs/<id>` | random 128-bit id, visible only to the user who started it; refreshes itself while running |
 | sign-in (D-23) | Only with `[onshape] auth = "oauth"` (needs `identity = "lan"` + TLS). `GET /auth/start` and `/auth/callback`: `Sec-Fetch-Dest: document` only; `state` single use, 10 min, bound to a nonce cookie (`Path=/auth/`) from the same browser; the `next` page must be `/print?…` or `/panel?…`. `POST /auth/claim` and `/auth/sign-out`: same-origin form POSTs; claim codes single use, 2 min. Session cookies: random 256-bit ids, `Secure; HttpOnly`, `SameSite=Lax` (top-level) or `SameSite=None; Partitioned` (panel), 30 days; stored server-side as hashes. Tokens: `signins.json`, 0600, never logged or sent to browsers. Onshape is read with the signed-in user's token; not signed in → the panel/page shows Sign in, other routes 401 |
+| `/admin` (D-28) | The config page (`admin.py`). Host/identity checked first as above. No admin password set (`os2slice admin-password`, never from a browser) → 503 on every `/admin` path. Unknown path → 404, wrong method → 405 |
+| `/admin` POSTs | `Sec-Fetch-Site: same-origin`, or no Sec-Fetch-Site but an `Origin` equal to the Host; an `Origin`, when sent, must equal the Host; else 403. Then the session (else 303 → `/admin/login`), then the body (urlencoded ≤ 64 KB, ≤ 400 fields, only the fields that form has, else 400), then a single-use CSRF token (30 min) bound to the session and the form's action (else 403), before anything is read or written |
+| `/admin/login` | `GET`: the form (signed in → 303 `/admin`). `POST`: CSRF token, then the per-peer rate limit (5 failures → 30 s lockout, doubling to 15 min; 20 from anyone → global; 429 + `Retry-After`), then a constant-time scrypt check (401 when wrong). Success: cookie `os2slice_admin` = random 256-bit token, `Path=/admin; Max-Age=43200; HttpOnly; SameSite=Strict`, plus `Secure` with TLS or `identity = "lan"`; kept in memory as a hash, 12 h, ends on restart and on a password change |
+| `/admin/*` | Every other route needs the session, else 303 → `/admin/login`. GETs only read (they may call modules' `check()`, `profiles()`, `printers()`); query params are whitelisted per route. `POST /admin/logout` revokes the session; `POST /admin/password` needs the current password (rate-limited like login) and only rotates it |
+| `/admin` saves | Raw TOML → the edit → `config.parse` (same rules as at start; error → the form again, 400, nothing written) → a trial module build with the new secrets (a missing required secret fails here) → secrets to the secret store (never config.toml, never shown again: pages say "set"/"not set") → atomic write (`tomlwrite`, file mode kept) → `Service.reload()`. Reload swaps config and modules under a lock and closes the old modules unless a job is running; `[server]` and `[onshape]` settings and new Onshape keys apply after a restart, and every page says so. "Test connection" builds one module from the form and runs `check()` without saving |
 | responses | CSP `default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'`, `nosniff`, `no-referrer`, `no-store`. Every interpolated value is HTML-escaped |
 
 Any web page can navigate a browser to `http://localhost:8765/open?…`, so every request is hostile until proven otherwise.

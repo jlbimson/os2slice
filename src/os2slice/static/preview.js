@@ -91,7 +91,7 @@ function frame() {
 const setNote = (text) => { note.textContent = text; };
 
 function currentBed() {
-  // Values are "<printer>" or "<printer>|<tray id>".
+  // The panel's printer menu holds the printer name (no tray since the filament menu split).
   const printer = form.elements.printer ? form.elements.printer.value.split("|")[0] : "";
   return beds[printer] || [256, 256];
 }
