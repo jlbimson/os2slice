@@ -26,7 +26,7 @@ category") ✅. The HA add-on and BamBuddy's compose are both the resolver flavo
 
 | Request | afk | resolver |
 |---|---|---|
-| `GET /health` | ✅ 200 `{status: "healthy", timestamp, checks: {orcaslicer: {available, version: "2.4.2"}, systemProfilePath: {accessible}}}`, 503 when unhealthy | ✅ same shape with `dataPath` instead of `systemProfilePath`. Without a writable `/app/data` (`DATA_PATH`) it answers **503 unhealthy** although slicing works. `version` is `"unknown"` on the Bambu Studio build (the regex looks for `OrcaSlicer-`), a known cosmetic issue |
+| `GET /health` | ✅ 200 `{status: "healthy", timestamp, checks: {orcaslicer: {available, version: "2.4.2"}, systemProfilePath: {accessible}}}`, 503 when unhealthy | ✅ same shape with `dataPath` instead of `systemProfilePath`. Without a writable `/app/data` (`DATA_PATH`) it answers **503 unhealthy** although slicing works; `check()` passes that case (slicer available, only `dataPath` failing) with a warning. `version` is `"unknown"` on the Bambu Studio build (the regex looks for `OrcaSlicer-`), a known cosmetic issue |
 | `GET /profiles/bundled` | ✅ 400 | ✅ `{printer: [{name, base_id}], process: [{name, base_id, compatible_printers}], filament: [{name, base_id, compatible_printers, filament_type, filament_colour}]}` (system presets, instantiable only, sorted) |
 | `GET /profiles/{printers\|presets\|filaments}` | ✅ `["name", …]`, all system profiles | ✅ `[]`: **stored user profiles** (`DATA_PATH/<category>/<name>.json`, names `[A-Za-z0-9]+`), not system ones |
 | `GET /profiles/{category}/{name}` | ✅ the resolved profile JSON; ✅ 404 `{message: "Profile \"…\" not found in category \"…\"."}` (used to explain a failure) | 📖 a stored user profile |
@@ -110,9 +110,10 @@ mostly `[trace]` lines; the module keeps only the `[error]` lines). Examples:
   printable area…"` (A1 Mini) or `"Found G-code in unprintable area of multi-extruder
   printers…"` + `Invalid T command` (H2D). ✅ Setting `wipe_tower_x`/`wipe_tower_y` in the
   process stub to the core's `tower_spots()` first choice fixed both (A1 Mini 2 filaments,
-  H2D 2 filaments on both nozzles, `filament_maps "1 2"`). The module passes
-  `SliceInput.extra["process_overrides"]` through for this; placing and retrying is the
-  core's (D-20), to move into `modules/bambu_project.py`.
+  H2D 2 filaments on both nozzles, `filament_maps "1 2"`). The module places the tower
+  with `bambu_project.tower_spots()` and retries the next spot on these errors through
+  `bambu_project.with_tower_retries()`, the same helper BamBuddy's module uses (D-30);
+  extra keys from the core arrive as `SliceInput.process_overrides`.
 - Uploads over the size cap (resolver: `MAX_MODEL_UPLOAD_MB`, default 512) answer 413 📖.
 
 ## Verified slices (2026-10-01, local Docker, slice only)
