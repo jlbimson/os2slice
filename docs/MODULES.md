@@ -1,10 +1,11 @@
 # Modules: slicers, targets, printers
 
-Decided 2026-10-01 (D-27). os2slice is becoming a general CAD → print broker: the part
-comes from Onshape, a **slicer module** turns it into a print file, and a **target
-module** hands that file to a printer or a print-farm service. BamBuddy, which did
-both, becomes one slicer module and one target module among several. Slicing can
-therefore move out of BamBuddy without changing anything else.
+Decided 2026-10-01 (D-27), deployed the same day (add-on 0.2.0 on barnassistant).
+os2slice is a general CAD → print broker: the part comes from Onshape, a **slicer
+module** turns it into a print file, and a **target module** hands that file to a
+printer or a print-farm service. BamBuddy, which did both, is one slicer module and one
+target module among several, so slicing can move out of BamBuddy without changing
+anything else.
 
 ```
 Onshape ──export──► orient (orientation.py) ──► SliceInput ──► Slicer.slice() ──► SliceOutput
@@ -18,12 +19,12 @@ The contract is `src/os2slice/modules/base.py`. Read it before touching a module
 
 | kind | role | technology | makes / accepts | status |
 |---|---|---|---|---|
-| `bambuddy` | slicer + target | fdm | makes `gcode.3mf`; accepts `gcode.3mf` | built; today's path, verified live on barnassistant |
-| `bambu-studio-api` | slicer | fdm | `gcode.3mf`, `gcode` | built (`modules/slicerapi.py`); verified live in local Docker, not yet on the NUC's add-on (port 3001); `docs/SLICERAPI_API.md` |
-| `orca-slicer-api` | slicer | fdm | `gcode.3mf`, `gcode` | built, same module; verified live in local Docker (port 3003) |
+| `bambuddy` | slicer + target | fdm | makes `gcode.3mf`; accepts `gcode.3mf` | built; in daily use on barnassistant (`[targets.bambuddy]`, migrated from `[bambuddy]` on `/admin`) |
+| `bambu-studio-api` | slicer | fdm | `gcode.3mf`, `gcode` | built (`modules/slicerapi.py`); verified live in local Docker, and in use on barnassistant since 2026-10-01 (the "Bambu Studio API" add-on, port 3001, added on `/admin`); `docs/SLICERAPI_API.md` |
+| `orca-slicer-api` | slicer | fdm | `gcode.3mf`, `gcode` | built, same module; verified live in local Docker (port 3003); not deployed |
 | `prusaslicer-cli` | slicer | fdm | `gcode`, `bgcode` | subprocess, later |
-| `moonraker` | target | fdm | `gcode` | built (`modules/moonraker.py`); read from docs, no live printer yet; `docs/PRINTER_APIS.md` |
-| `prusalink` | target | fdm | `gcode`, `bgcode` | built (`modules/prusalink.py`); read from docs, no live printer yet |
+| `moonraker` | target | fdm | `gcode` | built (`modules/moonraker.py`); read from docs, not yet tested on a printer; `docs/PRINTER_APIS.md` |
+| `prusalink` | target | fdm | `gcode`, `bgcode` | built (`modules/prusalink.py`); read from docs, not yet tested on a printer |
 | `octoprint` | target | fdm | `gcode` | later |
 | `preform-server` | slicer + target (pair only with itself) | sla | `form` | Formlabs Form 4, issue #2 |
 | `desktop` | hand-off | any | n/a | the local mode (`[slicers.*]` with `argv`), unchanged |
@@ -61,7 +62,7 @@ argv = ["flatpak", "run", "--file-forwarding", "com.orcaslicer.OrcaSlicer", "@@"
 
 [slicers.orca-api]               # OrcaSlicer as a server-side slicer (9b)
 kind = "orca-slicer-api"
-url = "http://172.30.32.1:3002"
+url = "http://172.30.32.1:3003"
 
 [targets.farm]
 kind = "bambuddy"                # role "both": slices too, as slicer "farm"
@@ -123,9 +124,12 @@ unchanged.
 ## Configuring from the browser
 
 The config page `/admin` (D-28, `admin.py`) edits the same config.toml. It is off
-until an admin password is set on the server (`os2slice admin-password`), then:
+(503) until an admin password is set on the server: `os2slice admin-password` on a
+desktop or in a container, the `admin_password` option in the add-on. Then, after
+signing in at `/admin/login`:
 
-- **Slicers / Targets** list the configured modules with their kind, key fields
+- **Slicers / Targets** (`/admin/slicers`, `/admin/targets`; `…/new?kind=`,
+  `…/edit?key=`, POST `…/save`, `…/remove`) list the configured modules with their kind, key fields
   (secrets only as "set"/"not set") and health from `check()`. **Add** offers every
   kind in `registry.kinds()` for that role (desktop hand-offs included, edited as
   `name` + `argv`) and renders the form from `ModuleSpec.fields`: `str`/`url`/`path`
@@ -135,12 +139,17 @@ until an admin password is set on the server (`os2slice admin-password`), then:
   profiles, bed_type; `extra` is kept as it was). **Test connection** builds that one
   module from the form (secrets from the form, else the store) and shows `check()`
   without saving. A module needs no page code: a new kind appears once registered.
-- **Printers**: `[printers.*]` entries, plus the printers targets found (read-only,
+- **Printers** (`/admin/printers`; POST `…/save`, `…/remove`, `…/default`): `[printers.*]` entries, plus the printers targets found (read-only,
   with **Override** to create `[printers."<name>"]`) and `default_printer`. Profile
   fields suggest the names the chosen slicer's `profiles()` returns.
-- **Onshape**, **Server**, **Print defaults**, **Secrets** (every
-  `<section>.<key>.<field>` the config implies), **Jobs**, **Log**, **Password**.
-- The legacy `[bambuddy]` table shows as "bambuddy (legacy table)" with **Migrate**,
+- **Onshape** (`/admin/onshape`), **Server** (`/admin/server`), **Print defaults**
+  (`/admin/defaults`), **Secrets** (`/admin/secrets`: every `<section>.<key>.<field>`
+  the config implies, write-only), **Jobs** (`/admin/jobs`), **Log** (`/admin/log`),
+  **Password** (`/admin/password`: change it, given the current one); **Sign out** is
+  POST `/admin/logout`. The overview `/admin` runs `doctor`'s config, Onshape, secret
+  and module-health checks.
+- The legacy `[bambuddy]` table shows as "bambuddy (legacy table)" with **Migrate**
+  (POST `/admin/targets/migrate`),
   which rewrites it as `[targets.bambuddy]` + `models` (presets' `source` →
   `extra.preset_source`, its `default_printer` → the top level); the result parses to
   the same `Config`.

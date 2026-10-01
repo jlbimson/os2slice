@@ -1,6 +1,8 @@
 # os2slice
 
-Print Onshape parts through BamBuddy from inside Onshape: pick the part, the face it stands on, the filament, walls, infill and supports, then queue it on a printer. Jobs wait in BamBuddy until someone presses Start.
+Print Onshape parts from inside Onshape: pick the part, the face it stands on, the printer, the filament, walls, infill and supports, then send it. Each printer has a slicer (BamBuddy itself, or the Bambu Studio API add-on) and a target (BamBuddy's queue; Klipper/Moonraker and PrusaLink printers are built but not yet tested on hardware). Jobs wait until someone starts them (in BamBuddy: Start).
+
+The options below set up one BamBuddy that slices and queues. Other slicers and printers are added on the config page `/admin` (below); [`docs/MODULES.md`](https://github.com/jlbimson/os2slice/blob/main/docs/MODULES.md) explains the modules.
 
 ## Configuration
 
@@ -42,3 +44,7 @@ The service has a config page for printers and slicers (modules), print defaults
 3. Secrets of other modules (e.g. a Moonraker or PrusaLink printer's API key) have no option; they live only on the page.
 
 A secret the add-on needs (the BamBuddy key, and the Onshape keys or OAuth client secret for the chosen `onshape_auth`) must be in one of the two places, or the add-on doesn't start and says which option to fill in.
+
+**Adding the Bambu Studio API add-on as a slicer.** On `/admin/slicers`, add a `bambu-studio-api` slicer with URL `http://172.30.32.1:3001` (the Home Assistant host, seen from this add-on), press **Test connection**, save, and name it as the `slicer` of a printer or of a BamBuddy model on the Targets or Printers page. Printers using it are sliced there and BamBuddy only queues. On barnassistant it was added this way on 2026-10-01.
+
+**The legacy `[bambuddy]` table.** The options write BamBuddy as the legacy `[bambuddy]` table; the Targets page shows it as "bambuddy (legacy table)" with **Migrate**, which rewrites it as `[targets.bambuddy]`. Changing an option that goes into the file later rewrites `config.toml` from the options, legacy table included, and the page's edits are gone (see "What persists").

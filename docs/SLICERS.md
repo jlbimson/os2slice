@@ -1,6 +1,8 @@
 # Launching slicers
 
-Every slicer is launched as `argv + [file]` from config. No shell.
+This page is about the desktop hand-off (local mode, `[slicers.<key>]` with `argv`): os2slice exports the part and opens it in a slicer on your own machine. Slicing on the server, for printing, is done by slicer modules (`[slicers.<key>]` with `kind`); see [`MODULES.md`](MODULES.md) and [`SLICERAPI_API.md`](SLICERAPI_API.md).
+
+Every desktop slicer is launched as `argv + [file]` from config. No shell.
 
 ## Linux
 

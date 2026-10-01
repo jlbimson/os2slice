@@ -35,7 +35,14 @@ argv = ["flatpak", "run", "--file-forwarding", "com.prusa3d.PrusaSlicer", "--sin
 # name = "PreForm"
 # argv = ["C:/Program Files/Formlabs/PreForm/PreForm.exe", "{file}", "--silentRepair", "--modelUnits", "mm"]
 
-# ---- BamBuddy printing (docs/BAMBUDDY_API.md) ----
+# ---- Printing: slicer and target modules (docs/MODULES.md) ----
+#
+# `os2slice serve` and `os2slice print` slice through a printer's *slicer module* and
+# send the result to its *target module*. The [bambuddy] table below is the legacy form
+# of one BamBuddy target that slices for itself; it is read as [targets.bambuddy]. The
+# config page (/admin, "Migrate") rewrites it in the module form. Secrets never go in
+# this file: they live in the secret store as "<section>.<key>.<field>"
+# (`os2slice setup-keys --secret targets.voron.api_key`, or the page's Secrets section).
 
 [bambuddy]
 base_url = "http://homeassistant:8000"   # on the NUC itself: http://127.0.0.1:8000
@@ -70,3 +77,49 @@ bottom_layers = 3        # solid bottom layers
 brim = false             # true: outer brim; false: no brim
 copies = 1               # copies of the selection on one plate (1-25)
 bed_type = "High Temp Plate"   # smooth PEI; per-model [bambuddy.presets.*] bed_type wins
+
+# ---- More modules (commented examples; docs/MODULES.md) ----
+#
+# A server-side slicer has a `kind` (the desktop hand-offs above have `argv` instead).
+# Kinds: bambu-studio-api, orca-slicer-api (sidecars, docs/SLICERAPI_API.md).
+# [slicers.studio-api]
+# kind = "bambu-studio-api"
+# url = "http://172.30.32.1:3001"    # the "Bambu Studio API" HA add-on, seen from os2slice
+# timeout_s = 900                    # optional
+# # api key: optional, secret store entry "slicers.studio-api.api_key"
+#
+# A target hands the print file to a printer or a queue. Kinds: bambuddy (slices too),
+# moonraker, prusalink (docs/PRINTER_APIS.md).
+# [targets.voron]
+# kind = "moonraker"
+# url = "http://voron.lan:7125"
+# ui_url = "http://voron.lan"        # optional: Mainsail / Fluidd, for "watch it" links
+# folder = "os2slice"                # optional: subfolder of gcodes
+# spoolman = false                   # optional: show Spoolman's active spool
+# # api key: optional, secret store entry "targets.voron.api_key"
+#
+# [printers.voron]                   # a printer of a target that doesn't list its printers
+# target = "voron"
+# slicer = "studio-api"              # must be a server-side slicer
+# model = "Voron 2.4 350"
+# bed_mm = [350, 350]
+# nozzle_count = 1
+# profiles = { printer = "Voron 2.4 350 0.4 nozzle", process = "0.20mm Standard @Voron", filament = "Generic PLA @System" }
+# materials = ["PLA black", "PETG grey"]   # what's loaded, when the target can't say
+#
+# BamBuddy in the module form, instead of the [bambuddy] table (not both):
+# default_printer = "A1 Mini"        # top level, above every table
+# [targets.bambuddy]
+# kind = "bambuddy"
+# url = "http://homeassistant:8000"
+# folder = "Onshape"
+# manual_start = true
+# # api key: secret store entry "targets.bambuddy.api_key"
+#
+# [targets.bambuddy.models."A1 Mini"]   # defaults for discovered printers of this model
+# slicer = "studio-api"              # omit: BamBuddy slices for itself
+# profiles = { printer = "Bambu Lab A1 mini 0.4 nozzle", process = "0.20mm Standard @BBL A1M", filament = "Bambu PLA Basic @BBL A1M" }
+# bed_type = "Textured PEI Plate"
+#
+# [printers."A1 Mini"]               # overrides for one discovered printer, by name
+# slicer = "studio-api"
