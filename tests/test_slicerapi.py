@@ -18,6 +18,8 @@ from typing import Any
 import httpx
 import pytest
 
+from os2slice.errors import BadRequest
+from os2slice.modules import bambu_project
 from os2slice.modules.base import (
     Material,
     ModuleAuthError,
@@ -237,8 +239,8 @@ def test_auto_flags_and_no_centring_when_arranging() -> None:
 def test_overrides_passed_through_as_strings() -> None:
     fake = FakeSidecar("resolver")
     settings = PrintSettings(4, 30, "tree", True, 6, 4, True)
-    extra = {"process_overrides": {"wipe_tower_x": "70.0", "wipe_tower_y": "114.7"}}
-    api(fake).slice(job(settings=settings, extra=extra), Log())
+    extra = {"wipe_tower_x": "70.0", "wipe_tower_y": "114.7"}
+    api(fake).slice(job(settings=settings, process_overrides=extra), Log())
     process = stub(fake.files(name="presetProfile")[0])
     assert process["wall_loops"] == "4" and process["sparse_infill_density"] == "30%"
     assert process["enable_support"] == "1" and process["support_type"] == "tree(auto)"
@@ -285,7 +287,7 @@ def test_copies_build_a_3mf_grid_on_the_bed(brim: bool, gap: float) -> None:
 def test_too_many_copies_refused_before_upload() -> None:
     fake = FakeSidecar("resolver")
     big = (PartGeometry("big", box_stl(100, 100, 10)),)
-    with pytest.raises(ModuleError, match="don't fit"):
+    with pytest.raises(BadRequest, match="don't fit"):  # the user's request, not the slicer
         api(fake).slice(job(big, settings=PrintSettings(copies=4), copies=4), Log())
     assert not fake.uploads
 
@@ -323,6 +325,60 @@ def test_dual_nozzle_pins_filaments() -> None:
     api(fake).slice(job(parts, H2D, profiles=profiles), Log())
     with zipfile.ZipFile(io.BytesIO(fake.files(name="file")[0].data)) as z:
         assert 'value="1 2"' in z.read("Metadata/model_settings.config").decode()
+
+
+TWO_COLOURS = (
+    PartGeometry("base", box_stl(40, 20, 5), Material("0", "red", "PLA", "#FF0000", None, "r")),
+    PartGeometry("text", box_stl(9, 5, 1, x=5), Material("5", "blue", "PLA", "#0000FF", None, "b")),
+)
+TOWER_REFUSED = (
+    500,
+    {
+        "message": "Slicing failed with error from slicer: Found G-code outside of the "
+        "printable area of the plate. Please check the model."
+    },
+)
+
+
+def test_two_filaments_get_the_first_tower_spot() -> None:
+    fake = FakeSidecar("resolver")
+    api(fake).slice(job(TWO_COLOURS, process_overrides={"layer_height": "0.16"}), Log())
+    process = stub(fake.files(name="presetProfile")[0])
+    first = bambu_project.layout(job(TWO_COLOURS)).tower_spots(A1_MINI)[0]
+    assert {k: process[k] for k in first} == first and process["layer_height"] == "0.16"
+    one = FakeSidecar("resolver")
+    api(one).slice(job(), Log())  # one filament: the slicer's default tower (none)
+    assert "wipe_tower_x" not in stub(one.files(name="presetProfile")[0])
+
+
+def test_tower_errors_move_the_tower_and_retry() -> None:
+    fake = FakeSidecar("resolver")
+    real = fake.handle
+    answers = iter([TOWER_REFUSED])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/slice":
+            fake.slice_error = next(answers, None)
+        return real(request)
+
+    fake.handle = handler  # type: ignore[method-assign]
+    log = Log()
+    out = api(fake).slice(job(TWO_COLOURS), log)
+    assert out.data and len(fake.uploads) == 2 and "Slicing again, prime tower moved (2)" in log
+    a, b = (stub(fake.files(n, "presetProfile")[0]) for n in (0, 1))
+    assert (a["wipe_tower_x"], a["wipe_tower_y"]) != (b["wipe_tower_x"], b["wipe_tower_y"])
+
+
+def test_tower_retries_stop_at_other_errors_and_the_last_spot() -> None:
+    fake = FakeSidecar("resolver", slice_error=(500, {"message": "Slicing failed: no space"}))
+    with pytest.raises(ModuleError, match="no space"):
+        api(fake).slice(job(TWO_COLOURS), Log())
+    assert len(fake.uploads) == 1  # not a tower problem: no retry
+    fake = FakeSidecar("resolver", slice_error=TOWER_REFUSED)
+    with pytest.raises(ModuleError, match="printable area"):
+        api(fake).slice(job(TWO_COLOURS), Log())
+    spots = bambu_project.layout(job(TWO_COLOURS)).tower_spots(A1_MINI)
+    assert len(fake.uploads) == len(spots) > 1  # every spot tried once
 
 
 def test_afk_refuses_multi_filament() -> None:

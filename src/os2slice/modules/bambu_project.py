@@ -4,15 +4,27 @@ Shared by the slicer modules that take a Bambu Studio / OrcaSlicer project: BamB
 and the sidecar APIs. The parts arrive oriented and dropped onto Z = 0 together
 (`orientation.orient_parts`); this module centres them on the bed, lays out copies
 (D-25), gives each distinct material its own filament (D-20), pins filaments to
-nozzles on dual-nozzle printers, and finds prime-tower spots beside the footprint.
+nozzles on dual-nozzle printers, finds prime-tower spots beside the footprint, and
+retries a slice with the next spot when the slicer rejects the tower
+(`with_tower_retries`), so that logic lives once for every Bambu-style slicer.
 """
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import TypeVar
 
 from os2slice.errors import BadRequest
-from os2slice.modules.base import Material, PrinterInfo, SliceInput, distinct_materials
+from os2slice.modules.base import (
+    Material,
+    ModuleError,
+    PrinterInfo,
+    Progress,
+    SliceInput,
+    distinct_materials,
+)
 from os2slice.orientation import bounding_box, translate_xy
 from os2slice.threemf import Part, build_3mf
 
@@ -41,6 +53,15 @@ TOWER_W, TOWER_D, GAP = 40.0, 60.0, 12.0  # generous tower footprint and clearan
 COPY_GAP, BRIM_GAP, BED_MARGIN = 6.0, 10.0, 5.0
 
 Footprint = tuple[float, float, float, float]  # x0, y0, x1, y1 on the bed, mm
+
+# Slicer errors that mean "move the prime tower" (docs/BAMBUDDY_API.md,
+# docs/SLICERAPI_API.md): "G-code conflicts detected… try moving the wipe tower",
+# "Found G-code outside of the printable area" (single nozzle) and "Found G-code in
+# unprintable area of multi-extruder printers" (H2D).
+TOWER_ERRORS = ("conflict", "printable area", "wipe tower", "prime tower")
+
+log = logging.getLogger(__name__)
+T = TypeVar("T")
 
 
 def bed_of(printer: PrinterInfo) -> tuple[float, float]:
@@ -101,6 +122,36 @@ def tower_spots(
         if lo_x <= x and x + TOWER_W <= hi_x and y >= 0 and y + TOWER_D <= d
     ]  # fmt: skip
     return [{"wipe_tower_x": f"{x:.1f}", "wipe_tower_y": f"{y:.1f}"} for x, y in ok]
+
+
+def is_tower_error(message: str) -> bool:
+    """Whether a slicer's error says the prime tower is in the way or off the plate."""
+    text = message.lower()
+    return any(w in text for w in TOWER_ERRORS)
+
+
+def with_tower_retries(
+    spots: Sequence[Mapping[str, str]],
+    attempt: Callable[[dict[str, str]], T],
+    progress: Progress = lambda s: None,
+) -> T:
+    """`attempt(tower)` with each prime-tower spot in turn until one slices (D-20).
+
+    `tower` is the spot's process keys (`wipe_tower_x`/`wipe_tower_y`; `{}` = the
+    slicer's default), to put on top of the job's process overrides. A ModuleError that
+    isn't about the tower, or one on the last spot, propagates unchanged.
+    """
+    spots = list(spots) or [{}]
+    for n, tower in enumerate(spots, start=1):
+        if n > 1:
+            progress(f"Slicing again, prime tower moved ({n})")
+        try:
+            return attempt(dict(tower))
+        except ModuleError as e:
+            if n == len(spots) or not is_tower_error(e.message):
+                raise
+            log.info("prime tower at %s rejected: %s", tower, e.message)
+    raise AssertionError("unreachable")  # pragma: no cover - the loop returns or raises
 
 
 @dataclass(frozen=True)
