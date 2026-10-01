@@ -114,6 +114,12 @@ from before: a target's `submit(start=False)` must leave the job waiting for a p
 SLA (issue #2) after. Development on Josh's desktop only; nothing is deployed to
 barnassistant until he says so.
 
+_Note (2026-10-01, later):_ the desktop-only restriction ended with the deployment.
+Add-on 0.2.0 runs on barnassistant at `https://dm-print.duckdns.org:8443`; Josh set the
+admin password, migrated `[bambuddy]` to `[targets.bambuddy]` on `/admin`, and added the
+"Bambu Studio API" add-on (port 3001) as a `bambu-studio-api` slicer there. PR #3 merged
+it into `main`.
+
 ## D-28: Web config page (2026-10-01, Josh)
 
 A config page in the service (`/admin`) for slicer and printer connections, Onshape
