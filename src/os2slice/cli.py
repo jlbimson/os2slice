@@ -330,7 +330,7 @@ def cmd_setup_keys(args: argparse.Namespace) -> int:
         email = client.check_keys()
     auth.store_keys(access, secret)
     account = f" (account {email})" if email else ""
-    print(f"Keys work{account} and are saved in the system keyring.")
+    print(f"Keys work{account} and are saved in {auth.secret_store_name()}.")
     return 0
 
 
@@ -353,12 +353,15 @@ def _setup_bambuddy_key(from_env: bool) -> int:
         auth_on = bb.auth_enabled()
     auth.store_bambuddy_key(key)
     note = "" if auth_on else " (BamBuddy auth is off, so the key itself couldn't be checked)"
-    print(f"BamBuddy answered with {len(printers)} printers; key saved in the keyring{note}.")
+    print(
+        f"BamBuddy answered with {len(printers)} printers; key saved in "
+        f"{auth.secret_store_name()}{note}."
+    )
     return 0
 
 
 def _setup_secret(name: str, from_env: bool) -> int:
-    """Store a module secret (<section>.<key>.<field>) in the keyring; never echoed."""
+    """Store a module secret (<section>.<key>.<field>) in the secret store; never echoed."""
     if from_env:
         value = os.environ.get(auth.secret_env(name), "").strip()
     else:
@@ -366,7 +369,7 @@ def _setup_secret(name: str, from_env: bool) -> int:
     if not value or any(c.isspace() for c in value):
         raise BadRequest(f"{name} is empty or has spaces")
     auth.store_secret(name, value)
-    print(f"{name} saved in the system keyring.")
+    print(f"{name} saved in {auth.secret_store_name()}.")
     return 0
 
 
@@ -456,12 +459,8 @@ def _check_keys(cfg: config.Config | None, offline: bool, add: Add) -> None:
     keys = None
     try:
         keys = auth.load_keys()
-        if keys.source == "keyring" or ADDON:
-            add(
-                PASS,
-                "API keys",
-                f"from the {'add-on/container settings' if ADDON else 'system keyring'}",
-            )
+        if keys.source in ("keyring", "file") or ADDON:
+            add(PASS, "API keys", f"from the {_secret_source(keys.source)}")
         else:
             add(WARN, "API keys", f"from ${auth.ENV_ACCESS}; run `os2slice setup-keys`")
     except Os2sliceError as e:
@@ -490,6 +489,15 @@ def _check_modules(cfg: config.Config, add: Add, offline: bool) -> None:
         check_module_health(modules, add)
 
 
+def _secret_source(source: str) -> str:
+    """Where a secret came from, for doctor rows (never its value)."""
+    if source == "file":
+        return f"secret file {auth.secrets_path()}"
+    if source == "environment" and ADDON:
+        return "add-on/container settings"
+    return "system keyring" if source == "keyring" else source
+
+
 def check_module_secrets(cfg: config.Config, add: Add) -> bool:
     """A row per module secret (never its value). True when a required one is missing."""
     sections = [("targets", t) for t in cfg.targets.values()]
@@ -503,8 +511,8 @@ def check_module_secrets(cfg: config.Config, add: Add) -> bool:
             name = registry.secret_name(section, m.key, f.key)
             value, source = auth.find_secret(name)
             if value:
-                where = "add-on/container settings" if ADDON else source
-                add(PASS if source == "keyring" or ADDON else WARN, name, f"from the {where}")
+                ok = source in ("keyring", "file") or ADDON
+                add(PASS if ok else WARN, name, f"from the {_secret_source(source)}")
             elif f.required:
                 missing = True
                 add(FAIL, name, "not in the keyring or the environment; run `os2slice "

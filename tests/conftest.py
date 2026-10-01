@@ -42,6 +42,10 @@ def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ONSHAPE_SECRET_KEY", raising=False)
     monkeypatch.setattr("keyring.get_password", lambda *a: None)
     monkeypatch.setattr("keyring.set_password", lambda *a: None)
+    # A usable (fake) keyring, so the file store is off unless a test turns it on.
+    monkeypatch.setattr("os2slice.auth._backend", lambda: object())
+    monkeypatch.delenv("OS2SLICE_ADDON", raising=False)
+    monkeypatch.delenv("PYTHON_KEYRING_BACKEND", raising=False)
 
 
 @pytest.fixture(autouse=True)
