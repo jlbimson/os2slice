@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Any, cast
 
 from os2slice.bambuddy import PresetChoice
 from os2slice.errors import BadRequest, ConfigError
+from os2slice.modules.base import ModelDefaults, ModuleSpec, Profiles
 from os2slice.request import FORMATS, SLICER_KEY_RE, Fmt
 from os2slice.settings import PrintSettings, check_bed_type
 
@@ -27,6 +29,13 @@ IP_RE = re.compile(r"(\d{1,3}\.){3}\d{1,3}")
 HOST_RE = re.compile(r"[A-Za-z0-9.-]+(:[0-9]{1,5})?|\[::1\](:[0-9]{1,5})?")
 UNITS = ("millimeter", "centimeter", "meter", "inch", "foot", "yard")
 FIX = "Edit {path}"
+# [printers.<key>]: BamBuddy printer names ("A1 Mini", "X1C_01") are keys too, so spaces
+# are allowed; "/" (discovered keys, "<target>/<id>") and "|" (form values) are not.
+PRINTER_KEY_RE = re.compile(r"[A-Za-z0-9_.()+-][A-Za-z0-9 _.()+-]{0,63}")
+TOP_LEVEL = {
+    "onshape", "server", "export", "slicers", "targets", "printers", "default_printer",
+    "bambuddy", "print_defaults", "web_studio",
+}  # fmt: skip
 
 
 @dataclass(frozen=True)
@@ -34,6 +43,37 @@ class SlicerConfig:
     key: str
     name: str
     argv: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ModuleConfig:
+    """A server-side module: [slicers.<key>] with `kind`, or [targets.<key>]."""
+
+    key: str
+    kind: str
+    values: Mapping[str, Any]  # validated non-secret fields, defaults filled in
+    models: Mapping[str, ModelDefaults] = field(default_factory=dict)  # targets only
+
+
+@dataclass(frozen=True)
+class PrinterConfig:
+    """[printers.<key>]: a hand-configured printer, or overrides for a discovered one.
+
+    `target` None = an override, matched by name against every discovering target.
+    """
+
+    key: str
+    target: str | None = None
+    slicer: str = ""
+    name: str = ""
+    model: str = ""
+    technology: str = ""
+    bed_mm: tuple[float, float] | None = None
+    nozzle_count: int = 1
+    profiles: Profiles = field(default_factory=Profiles)
+    materials: tuple[str, ...] = ()
+    bed_type: str | None = None
+    extra: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -45,8 +85,11 @@ class Config:
     export_format: Fmt
     units: str
     keep_days: int
-    slicers: dict[str, SlicerConfig]
-    bambuddy: BambuddyConfig | None = None
+    slicers: dict[str, SlicerConfig]  # desktop hand-offs ([slicers.*] with argv)
+    slicer_modules: dict[str, ModuleConfig] = field(default_factory=dict)
+    targets: dict[str, ModuleConfig] = field(default_factory=dict)
+    printers: dict[str, PrinterConfig] = field(default_factory=dict)
+    default_printer: str = ""  # a printer key or name
     print_defaults: PrintSettings = field(default_factory=PrintSettings)
     default_bed_type: str | None = None  # [print_defaults] bed_type
     server: ServerConfig = field(default_factory=lambda: ServerConfig())
@@ -86,6 +129,8 @@ class ServerConfig:
 
 @dataclass(frozen=True)
 class BambuddyConfig:
+    """The legacy [bambuddy] table, before it becomes [targets.bambuddy]."""
+
     base_url: str
     folder: str
     default_printer: str
@@ -139,10 +184,7 @@ def parse(data: dict[str, Any], path: Path) -> Config:
         if unknown:
             raise fail(f"unknown key(s) in [{name}]: {', '.join(unknown)}")
 
-    unknown_tables = sorted(
-        set(data)
-        - {"onshape", "server", "export", "slicers", "bambuddy", "print_defaults", "web_studio"}
-    )
+    unknown_tables = sorted(set(data) - TOP_LEVEL)
     if unknown_tables:
         raise fail(f"unknown table(s): {', '.join(unknown_tables)}")
 
@@ -225,13 +267,21 @@ def parse(data: dict[str, Any], path: Path) -> Config:
         raise fail("export.keep_days must be a whole number ≥ 0")
 
     slicers: dict[str, SlicerConfig] = {}
+    slicer_modules: dict[str, ModuleConfig] = {}
     for key, entry in table("slicers").items():
         where = f"slicers.{key}"
         if not SLICER_KEY_RE.fullmatch(key):
             raise fail(f"[{where}]: names may only use a-z, 0-9, _ and -")
         if not isinstance(entry, dict):
             raise fail(f"[{where}] must be a table")
-        check_keys(where, entry, {"name", "argv"})
+        if entry.get("kind", "desktop") != "desktop":
+            # A server-side slicer module; one with argv and no kind is the desktop hand-off.
+            spec = _spec(entry["kind"], where, fail)
+            if spec.role not in ("slicer", "both"):
+                raise fail(f"[{where}]: {spec.kind} isn't a slicer")
+            slicer_modules[key] = ModuleConfig(key, spec.kind, _values(where, spec, entry, fail))
+            continue
+        check_keys(where, {k: v for k, v in entry.items() if k != "kind"}, {"name", "argv"})
         argv = entry.get("argv")
         if (
             not isinstance(argv, list)
@@ -245,6 +295,20 @@ def parse(data: dict[str, Any], path: Path) -> Config:
         slicers[key] = SlicerConfig(key=key, name=name, argv=tuple(argv))
 
     bambuddy = _parse_bambuddy(data, fail) if "bambuddy" in data else None
+    targets = _parse_targets(table("targets"), fail)
+    default_printer = data.get("default_printer", "")
+    if not isinstance(default_printer, str):
+        raise fail("default_printer must be a printer name or key")
+    if bambuddy is not None:
+        # Compatibility: [bambuddy] is read as [targets.bambuddy], slicing with itself.
+        if "bambuddy" in targets:
+            raise fail("[bambuddy] and [targets.bambuddy] can't both be set; keep one")
+        if bambuddy.default_printer and default_printer:
+            raise fail("set default_printer at the top level or in [bambuddy], not both")
+        default_printer = default_printer or bambuddy.default_printer
+        targets = {"bambuddy": _bambuddy_target(bambuddy), **targets}
+    printers = _parse_printers(table("printers"), fail)
+    _check_pairs(slicers, slicer_modules, targets, printers, fail)
 
     pd = table("print_defaults")
     check_keys(
@@ -290,7 +354,10 @@ def parse(data: dict[str, Any], path: Path) -> Config:
         units=units,
         keep_days=keep_days,
         slicers=slicers,
-        bambuddy=bambuddy,
+        slicer_modules=slicer_modules,
+        targets=targets,
+        printers=printers,
+        default_printer=default_printer,
         print_defaults=print_defaults,
         default_bed_type=default_bed_type,
         server=server_cfg,
@@ -353,3 +420,266 @@ def _parse_bambuddy(data: dict[str, Any], fail: Any) -> BambuddyConfig:
             raise fail(f"{where}.bed_type: {e.message}") from e
         presets[model] = PresetChoice(source=source, bed_type=bed, **vals)  # type: ignore[arg-type]
     return BambuddyConfig(base_url, folder, default_printer, manual_start, presets, public_url)
+
+
+Fail = Callable[[str], ConfigError]
+
+
+def _spec(kind: object, where: str, fail: Fail) -> ModuleSpec:
+    from os2slice.modules.registry import kinds
+
+    known = kinds()
+    if not isinstance(kind, str) or kind not in known or kind == "desktop":
+        names = ", ".join(k for k in known if k != "desktop")
+        raise fail(f"{where}.kind must be one of {names}")
+    return known[kind]
+
+
+def _values(
+    where: str,
+    spec: ModuleSpec,
+    entry: dict[str, Any],
+    fail: Fail,
+    extra: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    """A module's config values, checked against its spec. Secrets may not appear here."""
+    fields = {f.key: f for f in spec.fields}
+    for k in entry:
+        if k in fields and fields[k].type == "secret":
+            raise fail(
+                f"{where}.{k} is a secret: keep it out of config.toml and store it with "
+                f"`os2slice setup-keys --secret {where}.{k}`"
+            )
+    unknown = sorted(set(entry) - {"kind"} - set(fields) - set(extra))
+    if unknown:
+        raise fail(f"unknown key(s) in [{where}]: {', '.join(unknown)}")
+    out: dict[str, Any] = {}
+    for f in spec.fields:
+        if f.type == "secret":
+            continue
+        if f.key not in entry:
+            if f.required:
+                raise fail(f"{where}.{f.key} is required ({f.label})")
+            if f.default is not None:
+                out[f.key] = f.default
+            continue
+        v = entry[f.key]
+        ok = {
+            "str": isinstance(v, str) and v != "",
+            "path": isinstance(v, str) and v != "",
+            "int": isinstance(v, int) and not isinstance(v, bool),
+            "bool": isinstance(v, bool),
+            "url": isinstance(v, str) and bool(HTTP_BASE_RE.fullmatch(v.rstrip("/"))),
+            "list": isinstance(v, list) and all(isinstance(x, str) for x in v),
+            "choice": v in f.choices,
+        }[f.type]
+        if not ok:
+            want = {
+                "url": "a URL like http://host:8000",
+                "choice": f"one of {', '.join(f.choices)}",
+                "list": "a list of strings",
+                "int": "a whole number",
+                "bool": "true or false",
+            }.get(f.type, "a non-empty string")
+            raise fail(f"{where}.{f.key} must be {want}")
+        out[f.key] = v.rstrip("/") if f.type == "url" else v
+    return out
+
+
+def _profiles(where: str, value: object, fail: Fail) -> Profiles:
+    if not isinstance(value, dict):
+        raise fail(f"{where}.profiles must be a table of printer, process and filament names")
+    unknown = sorted(set(value) - {"printer", "process", "filament"})
+    if unknown:
+        raise fail(f"unknown key(s) in {where}.profiles: {', '.join(unknown)}")
+    if not all(isinstance(v, str) for v in value.values()):
+        raise fail(f"{where}.profiles values must be profile names")
+    return Profiles(**value)
+
+
+def _bed_type(where: str, value: object, fail: Fail) -> str | None:
+    if value is not None and not isinstance(value, str):
+        raise fail(f"{where}.bed_type must be a build plate name")
+    try:
+        return check_bed_type(value)
+    except BadRequest as e:
+        raise fail(f"{where}.bed_type: {e.message}") from e
+
+
+def _extra(where: str, value: object, fail: Fail) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise fail(f"{where}.extra must be a table")
+    return dict(value)
+
+
+def _parse_targets(raw: dict[str, Any], fail: Fail) -> dict[str, ModuleConfig]:
+    targets: dict[str, ModuleConfig] = {}
+    for key, entry in raw.items():
+        where = f"targets.{key}"
+        if not SLICER_KEY_RE.fullmatch(key):
+            raise fail(f"[{where}]: names may only use a-z, 0-9, _ and -")
+        if not isinstance(entry, dict):
+            raise fail(f"[{where}] must be a table")
+        spec = _spec(entry.get("kind"), where, fail)
+        if spec.role not in ("target", "both"):
+            raise fail(f"[{where}]: {spec.kind} isn't a target")
+        values = _values(where, spec, entry, fail, extra=frozenset({"models"}))
+        models: dict[str, ModelDefaults] = {}
+        raw_models = entry.get("models", {})
+        if not isinstance(raw_models, dict):
+            raise fail(f"[{where}.models] must be a table")
+        for model, m in raw_models.items():
+            mw = f'{where}.models."{model}"'
+            if not isinstance(m, dict):
+                raise fail(f"[{mw}] must be a table")
+            unknown = sorted(set(m) - {"slicer", "profiles", "bed_type", "extra"})
+            if unknown:
+                raise fail(f"unknown key(s) in [{mw}]: {', '.join(unknown)}")
+            slicer = m.get("slicer", "")
+            if not isinstance(slicer, str) or (slicer and not SLICER_KEY_RE.fullmatch(slicer)):
+                raise fail(f"{mw}.slicer must be a slicer key")
+            models[model] = ModelDefaults(
+                slicer=slicer,
+                profiles=_profiles(mw, m.get("profiles", {}), fail),
+                bed_type=_bed_type(mw, m.get("bed_type"), fail),
+                extra=_extra(mw, m.get("extra", {}), fail),
+            )
+        targets[key] = ModuleConfig(key, spec.kind, values, models)
+    return targets
+
+
+PRINTER_FIELDS = {
+    "target", "slicer", "name", "model", "technology", "bed_mm", "nozzle_count",
+    "profiles", "materials", "bed_type", "extra",
+}  # fmt: skip
+
+
+def _parse_printers(raw: dict[str, Any], fail: Fail) -> dict[str, PrinterConfig]:
+    printers: dict[str, PrinterConfig] = {}
+    for key, entry in raw.items():
+        where = f'printers."{key}"'
+        if not PRINTER_KEY_RE.fullmatch(key):
+            raise fail(f"[{where}]: printer names may use letters, digits, spaces and _.()+-")
+        if not isinstance(entry, dict):
+            raise fail(f"[{where}] must be a table")
+        unknown = sorted(set(entry) - PRINTER_FIELDS)
+        if unknown:
+            raise fail(f"unknown key(s) in [{where}]: {', '.join(unknown)}")
+        target = entry.get("target")
+        if target is not None and not (isinstance(target, str) and SLICER_KEY_RE.fullmatch(target)):
+            raise fail(f"{where}.target must be a [targets.*] key")
+        strs = {k: entry.get(k, "") for k in ("slicer", "name", "model", "technology")}
+        if not all(isinstance(v, str) for v in strs.values()):
+            raise fail(f"{where}: slicer, name, model and technology must be strings")
+        if strs["technology"] not in ("", "fdm", "sla"):
+            raise fail(f'{where}.technology must be "fdm" or "sla"')
+        bed = entry.get("bed_mm")
+        if bed is not None and not (
+            isinstance(bed, list)
+            and len(bed) == 2
+            and all(isinstance(v, int | float) and not isinstance(v, bool) and v > 0 for v in bed)
+        ):
+            raise fail(f"{where}.bed_mm must be [width, depth] in mm")
+        nozzles = entry.get("nozzle_count", 1)
+        if not isinstance(nozzles, int) or isinstance(nozzles, bool) or not 1 <= nozzles <= 16:
+            raise fail(f"{where}.nozzle_count must be a whole number from 1 to 16")
+        materials = entry.get("materials", [])
+        if not (isinstance(materials, list) and all(isinstance(m, str) and m for m in materials)):
+            raise fail(f"{where}.materials must be a list of names")
+        printers[key] = PrinterConfig(
+            key=key,
+            target=target,
+            slicer=strs["slicer"],
+            name=strs["name"],
+            model=strs["model"],
+            technology=strs["technology"],
+            bed_mm=(float(bed[0]), float(bed[1])) if bed else None,
+            nozzle_count=nozzles,
+            profiles=_profiles(where, entry.get("profiles", {}), fail),
+            materials=tuple(materials),
+            bed_type=_bed_type(where, entry.get("bed_type"), fail),
+            extra=_extra(where, entry.get("extra", {}), fail),
+        )
+    return printers
+
+
+def _bambuddy_target(bb: BambuddyConfig) -> ModuleConfig:
+    """The legacy [bambuddy] table as [targets.bambuddy] with per-model defaults."""
+    values: dict[str, Any] = {
+        "url": bb.base_url,
+        "folder": bb.folder,
+        "manual_start": bb.manual_start,
+    }
+    if bb.public_url:
+        values["public_url"] = bb.public_url
+    models = {
+        model: ModelDefaults(
+            slicer="",  # "" = BamBuddy slices for itself
+            profiles=Profiles(p.printer, p.process, p.filament),
+            bed_type=p.bed_type,
+            extra={"preset_source": p.source},
+        )
+        for model, p in bb.presets.items()
+    }
+    return ModuleConfig("bambuddy", "bambuddy", values, models)
+
+
+def _check_pairs(
+    desktop: dict[str, SlicerConfig],
+    slicers: dict[str, ModuleConfig],
+    targets: dict[str, ModuleConfig],
+    printers: dict[str, PrinterConfig],
+    fail: Fail,
+) -> None:
+    """Every slicer named for a printer exists and can feed the printer's target."""
+    from os2slice.modules.registry import spec_for
+
+    for key in slicers:
+        if key in targets and spec_for(targets[key].kind).role == "both":
+            raise fail(f"[slicers.{key}] clashes with [targets.{key}], which slices too")
+
+    def pair(where: str, slicer: str, target_key: str) -> None:
+        tspec = spec_for(targets[target_key].kind)
+        if not slicer:
+            if tspec.role != "both":
+                raise fail(f"{where} needs a slicer ({tspec.label} doesn't slice)")
+            return
+        if slicer in slicers:
+            sspec = spec_for(slicers[slicer].kind)
+        elif slicer in targets and spec_for(targets[slicer].kind).role == "both":
+            sspec = spec_for(targets[slicer].kind)
+        elif slicer in desktop:
+            raise fail(f"{where}.slicer: {slicer!r} opens a desktop slicer and can't slice here")
+        else:
+            raise fail(f"{where}.slicer: no [slicers.{slicer}] is configured")
+        if not set(sspec.makes) & set(tspec.accepts):
+            raise fail(
+                f"{where}: {sspec.label} makes {', '.join(sspec.makes) or 'nothing'}, but "
+                f"{tspec.label} takes {', '.join(tspec.accepts) or 'nothing'}"
+            )
+        if sspec.technology != tspec.technology:
+            raise fail(
+                f"{where}: {sspec.label} is {sspec.technology}, {tspec.label} is {tspec.technology}"
+            )
+        if (sspec.pairs_only_with and tspec.kind not in sspec.pairs_only_with) or (
+            tspec.pairs_only_with and sspec.kind not in tspec.pairs_only_with
+        ):
+            raise fail(f"{where}: {sspec.label} and {tspec.label} only work with each other")
+
+    for key, t in targets.items():
+        for model, d in t.models.items():
+            pair(f'targets.{key}.models."{model}"', d.slicer, key)
+    discovering = [k for k, t in targets.items() if spec_for(t.kind).discovers_printers]
+    for key, p in printers.items():
+        where = f'printers."{key}"'
+        if p.target is None:
+            if not discovering:
+                raise fail(f"{where} needs a target (no configured target discovers printers)")
+            if p.slicer:
+                for t in discovering:
+                    pair(where, p.slicer, t)
+            continue
+        if p.target not in targets:
+            raise fail(f"{where}.target: no [targets.{p.target}] is configured")
+        if p.slicer or not spec_for(targets[p.target].kind).discovers_printers:
+            pair(where, p.slicer, p.target)

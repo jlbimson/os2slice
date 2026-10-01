@@ -1,0 +1,216 @@
+# Modules: slicers, targets, printers
+
+Decided 2026-10-01 (D-27). os2slice is becoming a general CAD → print broker: the part
+comes from Onshape, a **slicer module** turns it into a print file, and a **target
+module** hands that file to a printer or a print-farm service. BamBuddy, which did
+both, becomes one slicer module and one target module among several. Slicing can
+therefore move out of BamBuddy without changing anything else.
+
+```
+Onshape ──export──► orient (orientation.py) ──► SliceInput ──► Slicer.slice() ──► SliceOutput
+                                                                                      │
+                     panel / page / CLI  ◄── Submission ◄── Target.submit() ◄─────────┘
+```
+
+The contract is `src/os2slice/modules/base.py`. Read it before touching a module.
+
+## Module kinds
+
+| kind | role | technology | makes / accepts | status |
+|---|---|---|---|---|
+| `bambuddy` | slicer + target | fdm | makes `gcode.3mf`; accepts `gcode.3mf` | built; today's path, verified live on barnassistant |
+| `bambu-studio-api` | slicer | fdm | `gcode.3mf`, `gcode` | built (`modules/slicerapi.py`); verified live in local Docker, not yet on the NUC's add-on (port 3001); `docs/SLICERAPI_API.md` |
+| `orca-slicer-api` | slicer | fdm | `gcode.3mf`, `gcode` | built, same module; verified live in local Docker (port 3003) |
+| `prusaslicer-cli` | slicer | fdm | `gcode`, `bgcode` | subprocess, later |
+| `moonraker` | target | fdm | `gcode` | built (`modules/moonraker.py`); read from docs, no live printer yet; `docs/PRINTER_APIS.md` |
+| `prusalink` | target | fdm | `gcode`, `bgcode` | built (`modules/prusalink.py`); read from docs, no live printer yet |
+| `octoprint` | target | fdm | `gcode` | later |
+| `preform-server` | slicer + target (pair only with itself) | sla | `form` | Formlabs Form 4, issue #2 |
+| `desktop` | hand-off | any | n/a | the local mode (`[slicers.*]` with `argv`), unchanged |
+
+Pairings that load: either sidecar → `bambuddy` (`gcode.3mf`, BamBuddy uploads it to its
+library and queues it), → `moonraker` (`gcode`), → `prusalink` (`gcode`). `bambuddy` as a
+slicer pairs only with itself (it makes `gcode.3mf` only), so `bambuddy` → `moonraker`
+is refused at load.
+
+A slicer and a target pair when the slicer makes a medium the target accepts and the
+technologies match; `pairs_only_with` restricts further (PreForm). Config validation
+refuses a printer (or a model default) whose pair can't work, a slicer key that doesn't
+exist, and a desktop hand-off named as a printer's slicer (it can't slice on the server).
+The print gets the first medium in the target's `accepts` that the slicer `makes`.
+
+**Role "both".** A module whose spec has `role = "both"` (BamBuddy, later PreForm) is
+configured once, under `[targets.<key>]`. It is one instance that is both that target
+and a slicer of the same key: a printer or a model default may name `<key>` as its
+`slicer`, and an empty `slicer` means "the target slices for itself". A
+`[slicers.<key>]` may not reuse such a key.
+
+## Config
+
+As implemented in 9a–9c (`config.py`; every kind above marked built is registered):
+
+```toml
+default_printer = "X1C_01"       # a printer key or name (was [bambuddy] default_printer)
+
+[slicers.studio]                 # server-side module: has `kind`
+kind = "bambu-studio-api"
+url = "http://172.30.32.1:3001"
+
+[slicers.orca]                   # desktop hand-off: has `argv`, no `kind` (kind = "desktop")
+argv = ["flatpak", "run", "--file-forwarding", "com.orcaslicer.OrcaSlicer", "@@", "{file}", "@@"]
+
+[slicers.orca-api]               # OrcaSlicer as a server-side slicer (9b)
+kind = "orca-slicer-api"
+url = "http://172.30.32.1:3002"
+
+[targets.farm]
+kind = "bambuddy"                # role "both": slices too, as slicer "farm"
+url = "http://172.30.32.1:8000"
+folder = "Onshape"               # default "Onshape"
+manual_start = true              # default true; false = submit(start=True)
+public_url = "https://print.example.duckdns.org:8000"
+# api key: secret store entry "targets.farm.api_key" (never in this file)
+
+[targets.farm.models."X1C"]      # defaults for discovered printers, by model
+slicer = "studio"                # omit: the target slices for itself (role "both")
+profiles = { printer = "Bambu Lab X1 Carbon 0.4 nozzle", process = "0.20mm Standard @BBL X1C", filament = "Generic PLA @BBL X1C" }
+bed_type = "Textured PEI Plate"
+extra = { preset_source = "standard" }   # module-specific (BamBuddy: the presets' tier)
+
+[targets.voron]
+kind = "moonraker"
+url = "http://voron.lan:7125"
+# api key: "targets.voron.api_key" (optional; Moonraker trusts LAN ranges by default)
+
+[printers.voron]                 # a hand-configured printer (non-discovering target)
+target = "voron"
+slicer = "orca-api"              # required here; must be a server-side slicer
+model = "Voron 2.4 350"
+bed_mm = [350, 350]
+nozzle_count = 1
+profiles = { printer = "Voron 2.4 350 0.4 nozzle", process = "0.20mm Standard @Voron", filament = "Generic PLA @System" }
+materials = ["PLA black", "PETG grey"]   # when the target can't report what's loaded
+
+[printers."X1C_01"]              # overrides for a discovered printer, matched by name
+slicer = "orca-api"              # any of: slicer, profiles (per field), bed_mm, bed_type,
+                                 # materials, extra; no `target` = every discovering target
+```
+
+- `[printers.<key>]` keys: `target`, `slicer`, `name`, `model`, `technology` (`fdm`/`sla`,
+  default: the target's), `bed_mm`, `nozzle_count`, `profiles`, `materials`, `bed_type`,
+  `extra`. Keys may contain spaces (BamBuddy names like `"A1 Mini"`), not `/` or `|`.
+- Discovered printers get the key `<target>/<id>` (BamBuddy: `farm/3`). The web forms
+  send that key; the CLI and `default_printer` accept a key or a name.
+- Module field values are validated against the kind's `ModuleSpec.fields` (type,
+  required, default); unknown keys and secrets in the file are refused.
+
+Secrets: every `type = "secret"` field is looked up as `<section>.<name>.<key>` in the
+secret store (`auth.get_secret`): the keyring entry of that name, then
+`OS2SLICE_SECRET_<SECTION>_<NAME>_<KEY>` (dots and dashes as underscores) in the
+environment (dev, the add-on and Docker). A required secret that's missing stops the
+service at start. `os2slice setup-keys --secret targets.farm.api_key` stores one; the
+config page writes secrets to the store and never shows them.
+
+Compatibility: the old `[bambuddy]` table (with `[bambuddy.presets.<model>]`) is read
+as `[targets.bambuddy]` (kind `bambuddy`, slicing for itself) with the presets as
+per-model defaults (`source` becomes `extra.preset_source`), and its `default_printer`
+as the top-level one. `[bambuddy]` and `[targets.bambuddy]` can't both be set, nor two
+`default_printer`s. The old keyring entry `bambuddy_api_key` and `$BAMBUDDY_API_KEY`
+are read as `targets.bambuddy.api_key`, so existing configs, keys and the add-on keep
+working. `[print_defaults]`, `[onshape]`, `[server]`, `[export]`, `[web_studio]` are
+unchanged.
+
+## Configuring from the browser
+
+The config page `/admin` (D-28, `admin.py`) edits the same config.toml. It is off
+until an admin password is set on the server (`os2slice admin-password`), then:
+
+- **Slicers / Targets** list the configured modules with their kind, key fields
+  (secrets only as "set"/"not set") and health from `check()`. **Add** offers every
+  kind in `registry.kinds()` for that role (desktop hand-offs included, edited as
+  `name` + `argv`) and renders the form from `ModuleSpec.fields`: `str`/`url`/`path`
+  as text, `int` as a number, `bool` as a checkbox, `list` one per line, `choice` as a
+  select, `secret` as a write-only password input. A discovering target
+  (`discovers_printers`) also gets its per-model defaults (`models."<model>"`: slicer,
+  profiles, bed_type; `extra` is kept as it was). **Test connection** builds that one
+  module from the form (secrets from the form, else the store) and shows `check()`
+  without saving. A module needs no page code: a new kind appears once registered.
+- **Printers**: `[printers.*]` entries, plus the printers targets found (read-only,
+  with **Override** to create `[printers."<name>"]`) and `default_printer`. Profile
+  fields suggest the names the chosen slicer's `profiles()` returns.
+- **Onshape**, **Server**, **Print defaults**, **Secrets** (every
+  `<section>.<key>.<field>` the config implies), **Jobs**, **Log**, **Password**.
+- The legacy `[bambuddy]` table shows as "bambuddy (legacy table)" with **Migrate**,
+  which rewrites it as `[targets.bambuddy]` + `models` (presets' `source` →
+  `extra.preset_source`, its `default_printer` → the top level); the result parses to
+  the same `Config`.
+
+Saves are validated by `config.parse` before anything is written, the file is
+rewritten whole (comments are not kept), and the service reloads its modules at once;
+server and Onshape settings wait for a restart. In the Home Assistant add-on the file
+is written from the add-on options only on the first start, when those options change,
+or with `reset_config` on, so page edits persist across restarts until then; secrets
+saved on the page go to `secrets.json` in the state dir (no keyring there), and a
+filled-in secret option replaces its page value at each start (D-32).
+
+## What the core does with a printer
+
+1. `printers()` of every configured target (`registry.Modules.printers`) → one list for
+   the printer menu, each with `technology`, which selects the settings schema (FDM
+   today; SLA later), the bed for the preview, and `ui_url` for the "watch it" link.
+   A printer without a slicer or profiles is listed as unusable.
+2. `status()` for the chosen printer → state line and loaded `materials` for the filament
+   menu. A target that can't tell returns none, and the menu falls back to the printer's
+   configured `materials` (`PrinterInfo.materials`). Menu values are `Material.id`
+   (`[A-Za-z0-9_.-]{1,40}`); the right-click page's single menu sends `<key>|<id>`. A
+   material is usable once it has a `profile` and, on a dual-nozzle printer, an `extruder`.
+3. On Print: export + orient as today → `SliceInput` → the printer's slicer →
+   `SliceOutput` → the printer's target `submit(start=False)` unless the target is
+   configured to start (BamBuddy `manual_start = false`). The job page shows the
+   `Submission`.
+4. Multi-material (D-20) and copies (D-25): the core exports the parts and orients them
+   with one rotation and one drop (`orient_parts`); each `PartGeometry` carries its
+   material. Filament n is the n-th distinct material (`base.distinct_materials`), and
+   the target's `submit(materials=...)` gets the same list. A slicer that wants a Bambu
+   / Orca project builds it with `modules/bambu_project.py` (`build_project(job)`,
+   `layout(job)` for the footprint and filament profiles, `tower_spots`, `copy_offsets`;
+   bed from `PrinterInfo.bed_mm`, else a table by model); one that wants STL per part
+   gets `parts` as is. With more than one filament a Bambu-style slicer asks for a prime
+   tower beside the footprint: `bambu_project.with_tower_retries(project.tower_spots(
+   printer), attempt, progress)` calls `attempt(tower)` with each spot (process keys
+   `wipe_tower_x`/`wipe_tower_y`, on top of `SliceInput.process_overrides`) until one
+   isn't refused as a tower problem (D-20, D-30).
+5. "Open in Bambu Studio" (D-21) slices with the printer's slicer when it makes
+   `gcode.3mf` and copies that file's `Metadata/project_settings.config` onto the
+   project built from the same `SliceInput`.
+
+Optional on a target: `ui_url(request_host="") -> str`, its own queue page, for links
+that belong to no single printer (the panel, job pages). BamBuddy derives
+`http://<host>:8000/queue` from the request when `public_url` isn't set.
+
+## Module checklist
+
+- One file per module in `src/os2slice/modules/`, registered in `registry.py`
+  (`SLICERS` and/or `TARGETS` by `spec.kind`). The class is built as
+  `Cls.from_values(values, *, key, transport=None)` when it has that classmethod, else
+  `Cls(values, *, key, transport=None)`; `key` is passed only when the signature takes
+  it. `values` are the validated fields with secrets resolved (plus `models` for
+  targets), `key` its config name (use it in error fixes: "[targets.<key>]").
+- `spec` with every config field, so the config page and `doctor` need no module code.
+- Only the configured URL is called; nothing from a request. Timeouts on every call.
+- `ModuleError` with the service's own reason text; never swallow it. A 401/403 from
+  the service is `ModuleAuthError` (still HTTP 502; CLI exit code 3) whose fix names
+  the secret to check (`targets.<key>.api_key`).
+- `check()` never raises: it returns `Health(ok=False, summary=<why>)`. `Health.detail`
+  is a warning line (doctor prints it as WARN), so leave it empty when all is well.
+- Target `status()` follows the offline convention: an unreachable printer or service
+  is `PrinterStatus("offline", connected=False, ready=False, detail=<why>)`, not an
+  exception; only config and auth problems raise.
+- Slicers apply `settings.process_overrides()`, then `SliceInput.process_overrides`
+  (extra keys from the core), then their own tower spot; `SliceInput.extra` is for
+  module-specific facts only.
+- Optional `close()` when the module holds pooled connections; `Modules.close()` (or
+  `with Modules.from_config(...) as modules:`) calls it.
+- A fake transport in `tests/fakes_<module>.py` built from recorded shapes, and a
+  `docs/<MODULE>_API.md` with what was verified live (✅) versus read from docs.
+- Live tests behind `OS2SLICE_LIVE_<MODULE>_URL`; printing behind an explicit flag only.

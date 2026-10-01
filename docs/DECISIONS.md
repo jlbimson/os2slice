@@ -98,3 +98,122 @@ session status, and a cross-container handoff; the `duckdns` script dry-run with
 ## D-26: Separate printer and filament menus in the panel (2026-10-01, Josh)
 
 The panel has a **Printer** menu (printer names) and a **Filament** menu (the preset filament, value `""`, then that printer's loaded slots, value = global tray id). The server sends every printer's filament choices as JSON (`data-choices`) and renders the default printer's options itself; `panel.js` refills the menu when the printer changes, keeping the preset choice across printers and otherwise taking that printer's default (D-19's rule). The extra parts' menus (D-20) list the chosen printer's slots from it. The form gains a `filament` field; `printer` may still be the combined `name|tray` value, which the **right-click page keeps**, because that page runs no JavaScript (CSP without `script-src`) and so can't make one menu follow the other. Sending a tray in both fields is refused.
+
+## D-27: Slicer and target modules (2026-10-01, Josh)
+
+os2slice becomes a general CAD → print broker rather than a BamBuddy front end. Two
+kinds of pluggable module, bound per printer in config: **slicers** (geometry + settings
+→ print file) and **targets** (print file → printer or farm queue). BamBuddy is wrapped
+as one of each, so today's path keeps working while slicing moves to the Bambu Studio /
+OrcaSlicer sidecars called directly, and Moonraker, PrusaLink and PreFormServer join as
+targets. Contract: `src/os2slice/modules/base.py`; design: `docs/MODULES.md`. Rules kept
+from before: a target's `submit(start=False)` must leave the job waiting for a person
+(D-13); modules call only their configured URL; secrets live in the secret store under
+`<section>.<name>.<key>`, never in config.toml. Each module declares its config fields
+(`ModuleSpec`), which is what the web config page (D-28) renders. Priority: FDM first,
+SLA (issue #2) after. Development on Josh's desktop only; nothing is deployed to
+barnassistant until he says so.
+
+## D-28: Web config page (2026-10-01, Josh)
+
+A config page in the service (`/admin`) for slicer and printer connections, Onshape
+and server settings, print defaults, secrets, `doctor`, jobs and the log. It is the
+most sensitive page the service has and the service is open to the LAN (D-17), so:
+it needs an **admin password** (scrypt hash in the state dir, set with
+`os2slice admin-password` or the add-on option; no browser-based bootstrap, so a fresh
+install can't be claimed from the LAN), its own session cookie (`Secure; HttpOnly;
+SameSite=Strict`, 12 h), the same CSRF and same-origin rules as Print, login
+rate-limiting, and secrets that are write-only. Config writes are atomic
+(`config.toml.tmp` → rename) through a small TOML emitter for our own schema (no new
+dependency), the service reloads its config after a save, and settings that need a
+restart (bind, port, TLS) say so on the page.
+
+## D-29: The module seam, as built (Phase 9a, 2026-10-01)
+
+Calls made while moving the BamBuddy path onto the D-27 modules, keeping behaviour:
+- A role-"both" module is configured once under `[targets.<key>]`; it is also slicer
+  `<key>`, and an empty `slicer` means the target slices for itself.
+- Discovered printers are keyed `<target>/<id>`; forms send that key, the CLI and
+  `default_printer` take a key or a name. Material ids are strings
+  (`[A-Za-z0-9_.-]{1,40}`); an id the printer doesn't have fails the job (before any
+  upload) rather than the form, since only the target can tell.
+- `BambuddyError` is a `ModuleError`. BamBuddy's slice always downloads the sliced file
+  (`SliceOutput.data`); `submit` queues the library file the slice made instead of
+  uploading again, and uploads a file sliced elsewhere into the library root folder.
+- The preset `source` tier is BamBuddy-specific: it lives in the model's `extra`
+  (`preset_source`), not in `Profiles`.
+- A desktop hand-off can't be a printer's slicer (config error); the MODULES.md example
+  that did so now uses a server-side slicer key.
+- `cfg.bambuddy` is gone; `[bambuddy]` is only read as `[targets.bambuddy]`.
+
+## D-30: Joining the modules (Phase 9 integration, 2026-10-01)
+
+Calls made when the sidecar slicers (9b), the Moonraker / PrusaLink targets (9c) and the
+seam (9a) were joined:
+- **Prime tower handling lives once, core-side**, in `bambu_project.with_tower_retries`,
+  shared by every Bambu-style slicer (BamBuddy and the sidecars): with more than one
+  distinct material it tries `tower_spots()` in order as `wipe_tower_x`/`wipe_tower_y`
+  process keys and moves on when the slicer's error mentions a conflict, the
+  (un)printable area, or the wipe / prime tower. The sidecar module builds its 3MF with
+  `bambu_project.layout` too, so copies and the footprint are the same as BamBuddy's,
+  and too many copies is a `BadRequest` before any upload on every slicer.
+- **Sidecar gram figures come from `Metadata/slice_info.config`** (`weight`), then the
+  G-code header's per-filament list, then the HTTP headers: the sidecar's
+  `X-Filament-Used-g` is only the first filament's weight on multi-filament slices.
+- **Offline convention:** `Target.status()` returns `PrinterStatus("offline",
+  connected=False, ready=False, detail=<why>)` when the printer or the service in front
+  of it can't be reached, so menus and plans still render; it raises only for config
+  and auth problems. BamBuddy follows it now (any non-auth BamBuddy error while reading
+  status = offline).
+- **`ModuleAuthError(ModuleError)`** for a service's 401/403: HTTP 502 as before, CLI
+  exit code 3 like other key problems, and a fix that names the secret
+  (`targets.<key>.api_key`, `slicers.<key>.api_key`). `BambuddyAuthError` is both it and
+  the older `AuthError`. Modules now get their config `key` so messages can name it.
+- `SliceInput.process_overrides` is the typed channel for extra slicer keys from the
+  core; `extra` stays module-specific. `close()` is optional on modules and
+  `Modules.close()` / `with Modules.from_config(...)` closes them.
+- `Health.detail` is a warning line, not information: the resolver sidecar's 503
+  "unhealthy" for a missing `dataPath` alone (slicing works; BamBuddy's add-on answers
+  that way) passes with a warning instead of failing `doctor`.
+
+## D-31: The config page, as built (Phase 9d, 2026-10-01)
+
+Calls made building `/admin` (D-28):
+- Server and Onshape settings saved on the page go to the file but not into the running
+  service: the socket, the Host check, the sign-in redirect URI and the Onshape client
+  were made from them at start, so changing them live could lock the admin out. Every
+  page says "restart needed" until then. Everything else (modules, printers, defaults,
+  export, web studio) applies at once through `Service.reload()`.
+- A save builds the new modules once as a trial before writing, so a missing required
+  secret or a module that refuses its values fails the form, not the reload.
+- Reload closes the replaced modules unless a print job is queued or running (it may
+  hold them); then they are left to the garbage collector.
+- CSRF tokens are bound to the admin session as well as the form's action; login has its
+  own token without a session. A POST without Sec-Fetch-Site is accepted only with an
+  `Origin` equal to the Host (older browsers), never with neither.
+- Module and printer names can't be renamed on the page (secrets are stored under the
+  name); remove and add instead. The file is rewritten whole, without its comments.
+
+## D-32: The add-on and the config page (add-on 0.2.0, 2026-10-01)
+
+Making `/admin` work inside the Home Assistant add-on (D-12, D-28):
+- **`admin_password` option** (`password?`, 12+ characters, else an options error).
+  Hashed into `admin.json` only when `verify()` says it changed, so a restart keeps the
+  admin signed in. An empty option leaves a stored password alone: clearing a field on
+  the Configuration tab is too easy to do by accident to be the way to lock the page.
+- **`config.toml` persists.** It is written from the options only when there is none,
+  when the sha256 of the rendered text differs from `options.sha256` beside it, or with
+  `reset_config` on. Hashing the *rendered* text (not the options) means an add-on
+  upgrade that renders differently also rewrites it; the cost is that such an upgrade
+  discards page edits (DOCS.md says so). `render_config` still emits the
+  legacy `[bambuddy]` table; the page's Migrate button converts it.
+- **Secret file.** No keyring in the container, so with `OS2SLICE_ADDON=1` or a null /
+  fail keyring backend secrets are saved in `<state dir>/secrets.json` (0600, atomic).
+  Lookup: keyring (when usable) → file → environment. A keyring that exists but refuses
+  stays an error on a desktop (no silent plain-file fallback).
+- **Options win over the page.** The file comes before the environment, so an empty
+  option lets the page's value through; a filled-in option is exported to the
+  environment *and* its entries are deleted from the file at each start. A page save
+  while the option is filled in therefore works until the next start. Secret options
+  are no longer required when the file holds that secret (the Onshape key pair counts
+  as one: both options or neither).

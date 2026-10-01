@@ -11,11 +11,13 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from os2slice import __version__, auth, config, notify, pipeline, printing
 from os2slice.bambuddy import BambuddyClient
 from os2slice.errors import BadRequest, Os2sliceError
 from os2slice.logsetup import log_path, setup_logging
+from os2slice.modules import registry
 from os2slice.onshape import OnshapeClient
 from os2slice.orientation import Orientation
 from os2slice.request import (
@@ -26,6 +28,9 @@ from os2slice.request import (
 )
 from os2slice.settings import SUPPORTS, PrintSettings
 from os2slice.slicers import flatpak_app_id, resolve_executable
+
+if TYPE_CHECKING:
+    from os2slice import server
 
 log = logging.getLogger("os2slice")
 
@@ -59,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-c", "--configuration", default="", help="Onshape configuration string")
     s.set_defaults(func=cmd_send)
 
-    pr = sub.add_parser("print", help="slice a part in BamBuddy and queue it on a printer")
+    pr = sub.add_parser("print", help="slice a part and queue it on a printer")
     pr.add_argument("--url", required=True, help="Onshape Part Studio URL (from the address bar)")
     pr.add_argument(
         "--part",
@@ -68,7 +73,9 @@ def build_parser() -> argparse.ArgumentParser:
         "multi-material, e.g. --part Base --slot 0 --part Text --slot 4",
     )
     pr.add_argument("-c", "--configuration", default="", help="Onshape configuration string")
-    pr.add_argument("--printer", help="BamBuddy printer name or id (default: from config)")
+    pr.add_argument(
+        "--printer", help="printer name or key, e.g. 'X1C_01' or 'bambuddy/2' (default: config)"
+    )
     pr.add_argument(
         "--orient",
         default="as-modeled",
@@ -76,10 +83,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pr.add_argument(
         "--slot",
-        type=int,
         action="append",
-        help="print from this loaded filament (global tray id: AMS n slot s = n*4+s, external "
-        "254/255); one per --part",
+        help="print from this loaded filament (its id; on BamBuddy the global tray id: AMS n "
+        "slot s = n*4+s, external 254/255); one per --part",
     )
     pr.add_argument("--plate", help="build plate, e.g. 'Textured PEI Plate' (default: config)")
     pr.add_argument("--walls", help="wall loops (1-10)")
@@ -113,11 +119,19 @@ def build_parser() -> argparse.ArgumentParser:
     k.add_argument(
         "--bambuddy", action="store_true", help=f"store the BamBuddy key (${auth.ENV_BAMBUDDY})"
     )
+    k.add_argument(
+        "--secret",
+        metavar="NAME",
+        help="store a module secret, e.g. targets.farm.api_key (docs/MODULES.md)",
+    )
     k.set_defaults(func=cmd_setup_keys)
 
     d = sub.add_parser("doctor", help="check keys, config and slicers")
     d.add_argument("--offline", action="store_true", help="don't call the Onshape API")
     d.set_defaults(func=cmd_doctor)
+
+    a = sub.add_parser("admin-password", help="set the password of the config page (/admin)")
+    a.set_defaults(func=cmd_admin_password)
     return p
 
 
@@ -162,10 +176,8 @@ def _resolve_part(client: OnshapeClient, req: ExportRequest, wanted: str | None)
 
 def cmd_print(args: argparse.Namespace) -> int:
     cfg = config.load()
-    if cfg.bambuddy is None:
-        raise config.ConfigError(
-            "BamBuddy isn't configured", f"Add a [bambuddy] table to {cfg.path}"
-        )
+    if not cfg.targets:
+        raise config.ConfigError("No printers are configured", f"Add [targets.*] to {cfg.path}")
     orientation = Orientation.parse(args.orient)
     settings = PrintSettings.from_strings(
         {
@@ -184,10 +196,9 @@ def cmd_print(args: argparse.Namespace) -> int:
         },
         cfg.print_defaults,
     )
-    bb_key, _ = auth.load_bambuddy_key()
     with (
+        registry.Modules.from_config(cfg) as modules,
         OnshapeClient(cfg.onshape_base_url, auth.load_keys()) as onshape,
-        BambuddyClient(cfg.bambuddy.base_url, bb_key) as bambuddy,
     ):
         wanted = args.part or [None]
         slots = args.slot or []
@@ -198,7 +209,7 @@ def cmd_print(args: argparse.Namespace) -> int:
         req = dataclasses.replace(req, part_id=ids[0])
         extra = list(zip(ids[1:], slots[1:], strict=True))
         plan = printing.plan_print(
-            req, cfg, onshape, bambuddy, args.printer, orientation, settings,
+            req, cfg, onshape, modules, args.printer, orientation, settings,
             slots[0] if slots else None, args.plate, extra,
         )  # fmt: skip
         print("\n".join(plan.summary_lines()))
@@ -207,16 +218,21 @@ def cmd_print(args: argparse.Namespace) -> int:
             print("Cancelled; nothing was uploaded or printed.")
             return 0
         outcome = printing.execute_print(
-            plan, cfg, onshape, bambuddy, queue=queue, progress=lambda s: print(f"  … {s}")
+            plan, cfg, onshape, modules, queue=queue, progress=lambda s: print(f"  … {s}")
         )
     s = outcome.slice
-    minutes = f"{s.print_time_seconds // 60} min" if s.print_time_seconds else "? min"
-    grams = f"{s.filament_used_g:.1f} g" if s.filament_used_g is not None else "? g"
-    print(f"Sliced {s.name}: {minutes}, {grams} (BamBuddy library file {s.library_file_id})")
-    if outcome.queue_item is not None:
-        item = outcome.queue_item
-        how = "press Start in BamBuddy's queue" if plan.manual_start else "it starts when free"
-        print(f"Queued on {plan.printer.name} (queue item {item.get('id')}); {how}.")
+    minutes = f"{s.print_time_s // 60} min" if s.print_time_s else "? min"
+    grams = f"{s.material_g:.1f} g" if s.material_g is not None else "? g"
+    where = ", ".join(f"{k} {v}" for k, v in s.report.items() if k not in ("module", "url"))
+    print(f"Sliced {s.filename}: {minutes}, {grams}" + (f" ({where})" if where else ""))
+    sub = outcome.submission
+    if sub is not None:
+        how = (
+            f"press Start in {plan.target_label}'s queue"
+            if plan.manual_start
+            else "it starts when free"
+        )
+        print(f"Queued on {plan.printer.name} (queue item {sub.id}); {how}.")
     return 0
 
 
@@ -224,12 +240,21 @@ def cmd_serve(args: argparse.Namespace) -> int:
     from os2slice import server
 
     cfg = config.load()
-    if cfg.bambuddy is None:
-        raise config.ConfigError(
-            "BamBuddy isn't configured", f"Add a [bambuddy] table to {cfg.path}"
-        )
-    bb_key, _ = auth.load_bambuddy_key()
-    bb_url = cfg.bambuddy.base_url
+    if not cfg.targets:
+        raise config.ConfigError("No printers are configured", f"Add [targets.*] to {cfg.path}")
+    modules = registry.Modules.from_config(cfg)
+    try:
+        service = _make_service(cfg, modules)
+    except BaseException:
+        modules.close()
+        raise
+    server.serve(service)  # closes the service's modules when it stops
+    return 0
+
+
+def _make_service(cfg: config.Config, modules: registry.Modules) -> server.Service:
+    from os2slice import server
+
     signin = None
     if cfg.onshape_auth == "oauth":
         # Each user signs in (D-23); the shared API keys aren't used by the service.
@@ -252,11 +277,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         def onshape() -> OnshapeClient:
             return OnshapeClient(cfg.onshape_base_url, keys)
 
-    service = server.Service(
-        cfg, onshape=onshape, bambuddy=lambda: BambuddyClient(bb_url, bb_key), signin=signin
-    )
-    server.serve(service)
-    return 0
+    return server.Service(cfg, onshape=onshape, modules=modules, signin=signin)
 
 
 def _confirm(prompt: str) -> bool:
@@ -291,6 +312,8 @@ def _print_result(result: pipeline.Result) -> None:
 def cmd_setup_keys(args: argparse.Namespace) -> int:
     if args.bambuddy:
         return _setup_bambuddy_key(args.from_env)
+    if args.secret:
+        return _setup_secret(args.secret, args.from_env)
     if args.from_env:
         access = os.environ.get(auth.ENV_ACCESS, "").strip()
         secret = os.environ.get(auth.ENV_SECRET, "").strip()
@@ -307,7 +330,7 @@ def cmd_setup_keys(args: argparse.Namespace) -> int:
         email = client.check_keys()
     auth.store_keys(access, secret)
     account = f" (account {email})" if email else ""
-    print(f"Keys work{account} and are saved in the system keyring.")
+    print(f"Keys work{account} and are saved in {auth.secret_store_name()}.")
     return 0
 
 
@@ -320,22 +343,50 @@ def _setup_bambuddy_key(from_env: bool) -> int:
     if not key or any(c.isspace() for c in key):
         raise BadRequest("The BamBuddy key is empty or has spaces")
     cfg = config.load()
-    if cfg.bambuddy is None:
+    target = cfg.targets.get("bambuddy")
+    if target is None or target.kind != "bambuddy":
         raise config.ConfigError(
             "BamBuddy isn't configured", f"Add a [bambuddy] table to {cfg.path}"
         )
-    with BambuddyClient(cfg.bambuddy.base_url, key) as bb:
+    with BambuddyClient(target.values["url"], key) as bb:
         printers = bb.list_printers()
         auth_on = bb.auth_enabled()
     auth.store_bambuddy_key(key)
     note = "" if auth_on else " (BamBuddy auth is off, so the key itself couldn't be checked)"
-    print(f"BamBuddy answered with {len(printers)} printers; key saved in the keyring{note}.")
+    print(
+        f"BamBuddy answered with {len(printers)} printers; key saved in "
+        f"{auth.secret_store_name()}{note}."
+    )
     return 0
+
+
+def _setup_secret(name: str, from_env: bool) -> int:
+    """Store a module secret (<section>.<key>.<field>) in the secret store; never echoed."""
+    if from_env:
+        value = os.environ.get(auth.secret_env(name), "").strip()
+    else:
+        value = getpass.getpass(f"{name} (hidden): ").strip()
+    if not value or any(c.isspace() for c in value):
+        raise BadRequest(f"{name} is empty or has spaces")
+    auth.store_secret(name, value)
+    print(f"{name} saved in {auth.secret_store_name()}.")
+    return 0
+
+
+# -- admin-password -----------------------------------------------------------
+
+
+def cmd_admin_password(args: argparse.Namespace) -> int:
+    """Set the config page's password (D-28). Only here, never from a browser."""
+    from os2slice.adminauth import AdminStore, admin_path, set_password_interactive
+
+    return 0 if set_password_interactive(AdminStore(admin_path())) else 1
 
 
 # -- doctor -------------------------------------------------------------------
 
-PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
+PASS, WARN, FAIL, NOTE = "PASS", "WARN", "FAIL", "NOTE"  # NOTE: informational, never fails
+Add = Callable[[str, str, str], None]
 ADDON = (
     os.environ.get("OS2SLICE_ADDON") == "1"
 )  # set by the Home Assistant add-on and the Docker image
@@ -354,25 +405,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except Os2sliceError as e:
         add(FAIL, "config", e.one_line())
 
-    if cfg and cfg.onshape_auth == "oauth":
-        # Per-user sign-in (D-23): no shared keys; check the OAuth app's client instead.
-        try:
-            auth.load_oauth_client_secret()
-            add(PASS, "Onshape sign-in", f"per user; redirect URI {cfg.oauth_redirect_uri}")
-        except Os2sliceError as e:
-            add(FAIL, "Onshape sign-in", e.one_line())
-    else:
-        _check_keys(cfg, args, add)
+    check_onshape(cfg, args.offline, add)
 
     if cfg and not ADDON:
         _check_export_dir(cfg, add)
-        if not cfg.slicers and cfg.bambuddy is None:
-            add(FAIL, "slicers", f"no slicers and no [bambuddy] in {cfg.path}")
+        if not cfg.slicers and not cfg.targets:
+            add(FAIL, "slicers", f"no slicers and no printers in {cfg.path}")
         for s in cfg.slicers.values():
             _check_slicer(s, add)
 
-    if cfg and cfg.bambuddy:
-        _check_bambuddy(cfg, add, offline=args.offline)
+    if cfg:
+        _check_modules(cfg, add, offline=args.offline)
+    check_admin_password(add)
 
     if ADDON:
         pass  # no desktop inside the add-on; the page and the log report errors
@@ -388,24 +432,41 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 1 if any(s == FAIL for s, _, _ in rows) else 0
 
 
-def _check_keys(
-    cfg: config.Config | None, args: argparse.Namespace, add: Callable[[str, str, str], None]
-) -> None:
+def check_onshape(cfg: config.Config | None, offline: bool, add: Add) -> None:
+    """Onshape credentials: the OAuth client secret (D-23), or the shared API keys."""
+    if cfg and cfg.onshape_auth == "oauth":
+        # Per-user sign-in (D-23): no shared keys; check the OAuth app's client instead.
+        try:
+            auth.load_oauth_client_secret()
+            add(PASS, "Onshape sign-in", f"per user; redirect URI {cfg.oauth_redirect_uri}")
+        except Os2sliceError as e:
+            add(FAIL, "Onshape sign-in", e.one_line())
+    else:
+        _check_keys(cfg, offline, add)
+
+
+def check_admin_password(add: Add) -> None:
+    """Whether the config page has a password (a note: /admin is optional, D-28)."""
+    from os2slice.adminauth import AdminStore, admin_path
+
+    if AdminStore(admin_path()).has_password():
+        add(PASS, "admin password", "set; the config page /admin is on")
+    else:
+        add(NOTE, "admin password", "not set, so /admin is off; `os2slice admin-password` sets it")
+
+
+def _check_keys(cfg: config.Config | None, offline: bool, add: Add) -> None:
     keys = None
     try:
         keys = auth.load_keys()
-        if keys.source == "keyring" or ADDON:
-            add(
-                PASS,
-                "API keys",
-                f"from the {'add-on/container settings' if ADDON else 'system keyring'}",
-            )
+        if keys.source in ("keyring", "file") or ADDON:
+            add(PASS, "API keys", f"from the {_secret_source(keys.source)}")
         else:
             add(WARN, "API keys", f"from ${auth.ENV_ACCESS}; run `os2slice setup-keys`")
     except Os2sliceError as e:
         add(FAIL, "API keys", e.one_line())
 
-    if cfg and keys and not args.offline:
+    if cfg and keys and not offline:
         try:
             with OnshapeClient(cfg.onshape_base_url, keys) as client:
                 email = client.check_keys()
@@ -414,36 +475,75 @@ def _check_keys(
             add(FAIL, "Onshape login", e.one_line())
 
 
-def _check_bambuddy(
-    cfg: config.Config, add: Callable[[str, str, str], None], offline: bool
-) -> None:
-    if cfg.bambuddy is None:
+def _check_modules(cfg: config.Config, add: Add, offline: bool) -> None:
+    """A row per secret and per configured slicer/target module (its own `check()`)."""
+    missing = check_module_secrets(cfg, add)
+    if offline or missing:
         return
     try:
-        key, source = auth.load_bambuddy_key()
-        status = PASS if source == "keyring" or ADDON else WARN
-        add(status, "BamBuddy key", f"from the {'add-on/container settings' if ADDON else source}")
+        modules = registry.Modules.from_config(cfg)
     except Os2sliceError as e:
-        add(FAIL, "BamBuddy key", e.one_line())
+        add(FAIL, "modules", e.one_line())
         return
-    if offline:
-        return
-    try:
-        with BambuddyClient(cfg.bambuddy.base_url, key) as bb:
-            printers = bb.list_printers()
-            auth_on = bb.auth_enabled()
-    except Os2sliceError as e:
-        add(FAIL, "BamBuddy", e.one_line())
-        return
-    add(PASS, "BamBuddy", f"{cfg.bambuddy.base_url}: {len(printers)} printers")
-    if not auth_on:
-        add(PASS, "BamBuddy auth", "off by choice (D-16); os2slice still sends its key")
-    for p in printers:
-        if p.is_active and p.model not in cfg.bambuddy.presets:
-            add(WARN, f"presets {p.model}", f"none configured; {p.name} can't be used")
+    with modules:
+        check_module_health(modules, add)
 
 
-def _check_export_dir(cfg: config.Config, add: Callable[[str, str, str], None]) -> None:
+def _secret_source(source: str) -> str:
+    """Where a secret came from, for doctor rows (never its value)."""
+    if source == "file":
+        return f"secret file {auth.secrets_path()}"
+    if source == "environment" and ADDON:
+        return "add-on/container settings"
+    return "system keyring" if source == "keyring" else source
+
+
+def check_module_secrets(cfg: config.Config, add: Add) -> bool:
+    """A row per module secret (never its value). True when a required one is missing."""
+    sections = [("targets", t) for t in cfg.targets.values()]
+    sections += [("slicers", s) for s in cfg.slicer_modules.values()]
+    missing = False
+    for section, m in sections:
+        spec = registry.spec_for(m.kind)
+        for f in spec.fields:
+            if f.type != "secret":
+                continue
+            name = registry.secret_name(section, m.key, f.key)
+            value, source = auth.find_secret(name)
+            if value:
+                ok = source in ("keyring", "file") or ADDON
+                add(PASS if ok else WARN, name, f"from the {_secret_source(source)}")
+            elif f.required:
+                missing = True
+                add(FAIL, name, "not in the secret store or the environment; run `os2slice "
+                    + ("setup-keys --bambuddy`" if name == auth.BAMBUDDY_SECRET
+                       else f"setup-keys --secret {name}`"))  # fmt: skip
+    return missing
+
+
+def check_module_health(modules: registry.Modules, add: Add) -> None:
+    """A row per built slicer/target module, from its own `check()`."""
+    seen: set[int] = set()
+    for section, key, module in [
+        *(("target", k, t) for k, t in modules.targets.items()),
+        *(("slicer", k, s) for k, s in modules.slicers.items()),
+    ]:
+        if id(module) in seen:
+            continue  # a slicer + target module is checked once
+        seen.add(id(module))
+        role = "slicer + target" if module.spec.role == "both" else section
+        label = f"{role} {key}"
+        try:
+            health = module.check()
+        except Os2sliceError as e:
+            add(FAIL, label, f"{module.spec.label}: {e.one_line()}")
+            continue
+        add(PASS if health.ok else FAIL, label, f"{module.spec.label}: {health.summary}")
+        if health.detail:
+            add(WARN, label, health.detail)
+
+
+def _check_export_dir(cfg: config.Config, add: Add) -> None:
     try:
         cfg.export_dir.mkdir(parents=True, exist_ok=True)
         if os.access(cfg.export_dir, os.W_OK):
@@ -454,7 +554,7 @@ def _check_export_dir(cfg: config.Config, add: Callable[[str, str, str], None]) 
         add(FAIL, "export dir", f"{cfg.export_dir}: {e.strerror}")
 
 
-def _check_slicer(s: config.SlicerConfig, add: Callable[[str, str, str], None]) -> None:
+def _check_slicer(s: config.SlicerConfig, add: Add) -> None:
     label = f"slicer {s.key}"
     exe = resolve_executable(s.argv[0])
     if exe is None:
