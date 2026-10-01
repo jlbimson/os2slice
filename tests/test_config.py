@@ -89,3 +89,207 @@ def test_trailing_slash_and_name_default() -> None:
     )
     assert cfg.onshape_base_url == "https://acme.onshape.com"
     assert cfg.slicers["x"].name == "x"
+
+
+# -- modules: [slicers.*] with kind, [targets.*], [printers.*] (docs/MODULES.md) ----------
+
+FARM = {"kind": "bambuddy", "url": "http://bb:8000/"}
+A1_PROFILES = {"printer": "p", "process": "q", "filament": "Bambu PLA Basic @BBL A1M"}
+
+
+def test_targets_and_printers_tables() -> None:
+    cfg = _parse(
+        {
+            "targets": {
+                "farm": {
+                    **FARM,
+                    "folder": "Parts",
+                    "models": {
+                        "A1 Mini": {
+                            "profiles": A1_PROFILES,
+                            "bed_type": "Textured PEI Plate",
+                            "extra": {"preset_source": "cloud"},
+                        }
+                    },
+                }
+            },
+            "printers": {"X1C_01": {"profiles": {"filament": "Bambu ASA @BBL X1C"}}},
+            "default_printer": "A1 Mini",
+        }
+    )
+    farm = cfg.targets["farm"]
+    assert (farm.kind, farm.values) == (
+        "bambuddy",
+        {"url": "http://bb:8000", "folder": "Parts", "manual_start": True},
+    )
+    a1 = farm.models["A1 Mini"]
+    assert a1.slicer == "" and a1.profiles.filament == "Bambu PLA Basic @BBL A1M"
+    assert a1.bed_type == "Textured PEI Plate" and a1.extra == {"preset_source": "cloud"}
+    over = cfg.printers["X1C_01"]
+    assert over.target is None and over.profiles.filament == "Bambu ASA @BBL X1C"
+    assert cfg.default_printer == "A1 Mini" and cfg.bambuddy is None
+    assert set(cfg.slicers) == set() and cfg.slicer_modules == {}
+
+
+def test_a_slicer_module_and_a_desktop_slicer_side_by_side() -> None:
+    cfg = _parse(
+        {
+            "slicers": {
+                "orca": {"argv": ["orca-slicer", "{file}"]},
+                "bb": {"kind": "bambuddy", "url": "http://bb:8000"},
+            },
+            "targets": {"farm": FARM},
+            "printers": {"X1C_01": {"target": "farm", "slicer": "bb"}},
+        }
+    )
+    assert set(cfg.slicers) == {"orca"} and set(cfg.slicer_modules) == {"bb"}
+    assert cfg.slicer_modules["bb"].values["url"] == "http://bb:8000"
+    assert cfg.printers["X1C_01"].slicer == "bb"
+
+
+def test_legacy_bambuddy_table_is_read_as_a_target() -> None:
+    preset = {**A1_PROFILES, "source": "cloud", "bed_type": "Cool Plate"}
+    cfg = _parse(
+        {
+            "bambuddy": {
+                "base_url": "http://bb:8000",
+                "public_url": "https://bb.example:8000",
+                "default_printer": "A1 Mini",
+                "manual_start": False,
+                "presets": {"A1 Mini": preset},
+            }
+        }
+    )
+    t = cfg.targets["bambuddy"]
+    assert t.kind == "bambuddy"
+    assert t.values == {
+        "url": "http://bb:8000",
+        "folder": "Onshape",
+        "manual_start": False,
+        "public_url": "https://bb.example:8000",
+    }
+    d = t.models["A1 Mini"]
+    assert d.slicer == "" and d.profiles.process == "q" and d.bed_type == "Cool Plate"
+    assert d.extra == {"preset_source": "cloud"}
+    assert cfg.default_printer == "A1 Mini"
+
+
+def test_default_printer_may_move_to_the_top_level() -> None:
+    cfg = _parse({"bambuddy": {"base_url": "http://bb:8000"}, "default_printer": "X1C_01"})
+    assert cfg.default_printer == "X1C_01"
+
+
+MODELS_X1C = {"X1C": {"bed_type": "Glass"}}
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    [
+        ({"targets": {"farm": {"url": "http://bb"}}}, "kind must be one of"),
+        ({"targets": {"farm": {"kind": "octoprint", "url": "http://x"}}}, "kind must be one of"),
+        ({"targets": {"farm": {"kind": "bambuddy"}}}, "url is required"),
+        ({"targets": {"farm": {**FARM, "url": "ftp://x"}}}, "must be a URL"),
+        ({"targets": {"farm": {**FARM, "manual_start": "yes"}}}, "true or false"),
+        ({"targets": {"farm": {**FARM, "api_key": "s3cret"}}}, "is a secret"),
+        ({"targets": {"farm": {**FARM, "colour": "red"}}}, "unknown key"),
+        ({"targets": {"Farm": FARM}}, "names may only"),
+        ({"targets": {"farm": {**FARM, "models": MODELS_X1C}}}, "bed_type"),
+        ({"targets": {"farm": {**FARM, "models": {"X1C": {"profile": {}}}}}}, "unknown key"),
+        (
+            {"targets": {"farm": {**FARM, "models": {"X1C": {"profiles": {"nozzle": "x"}}}}}},
+            "unknown key",
+        ),
+        ({"slicers": {"s": {"kind": "bambuddy", "url": "http://x", "argv": ["x"]}}}, "unknown"),
+        (
+            {"bambuddy": {"base_url": "http://bb:8000"}, "targets": {"bambuddy": FARM}},
+            "can't both be set",
+        ),
+        (
+            {
+                "bambuddy": {"base_url": "http://bb:8000", "default_printer": "A"},
+                "default_printer": "B",
+            },
+            "not both",
+        ),
+        ({"default_printer": 3}, "default_printer"),
+        ({"printers": {"X1C_01": {"slicer": "bb"}}}, "needs a target"),
+        ({"targets": {"farm": FARM}, "printers": {"a/b": {}}}, "printer names"),
+        ({"targets": {"farm": FARM}, "printers": {"p": {"target": "nope"}}}, r"no \[targets.nope"),
+        ({"targets": {"farm": FARM}, "printers": {"p": {"bed_mm": [0, 3]}}}, "bed_mm"),
+        ({"targets": {"farm": FARM}, "printers": {"p": {"technology": "sls"}}}, "technology"),
+        ({"targets": {"farm": FARM}, "printers": {"p": {"materials": "PLA"}}}, "materials"),
+        ({"targets": {"farm": FARM}, "printers": {"p": {"colour": 1}}}, "unknown key"),
+    ],
+)
+def test_invalid_module_config(data: dict, message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        _parse(data)
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    [
+        # A printer may only name a slicer that exists...
+        ({"targets": {"farm": FARM}, "printers": {"p": {"slicer": "nope"}}}, r"no \[slicers.nope"),
+        # ...that slices on the server, not a desktop hand-off...
+        (
+            {
+                "slicers": {"orca": {"argv": ["orca-slicer"]}},
+                "targets": {"farm": FARM},
+                "printers": {"p": {"target": "farm", "slicer": "orca"}},
+            },
+            "desktop slicer",
+        ),
+        # ...also in a model's defaults.
+        (
+            {"targets": {"farm": {**FARM, "models": {"X1C": {"slicer": "studio"}}}}},
+            r"no \[slicers.studio",
+        ),
+        # A slicer key may not shadow a target that slices for itself.
+        (
+            {
+                "slicers": {"farm": {"kind": "bambuddy", "url": "http://x"}},
+                "targets": {"farm": FARM},
+            },
+            "clashes",
+        ),
+    ],
+)
+def test_pairing_errors(data: dict, message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        _parse(data)
+
+
+def test_pairing_checks_media_technology_and_exclusive_modules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With stand-in module kinds: what a slicer makes must be what the target takes."""
+    from dataclasses import replace
+
+    from os2slice.modules import registry
+    from os2slice.modules.base import ModuleSpec
+
+    base = registry.spec_for("bambuddy")
+
+    def kind(spec: ModuleSpec) -> type:
+        return type(spec.kind, (), {"spec": spec})
+
+    stand_ins = {
+        "gcode-slicer": replace(base, kind="gcode-slicer", role="slicer", makes=("gcode",)),
+        "sla-slicer": replace(base, kind="sla-slicer", role="slicer", technology="sla"),
+        "preform": replace(base, kind="preform", role="slicer", pairs_only_with=("preform",)),
+    }
+    for k, spec in stand_ins.items():
+        monkeypatch.setitem(registry.SLICERS, k, kind(spec))
+    for slicer, message in (
+        ("gcode-slicer", "makes gcode, but BamBuddy takes gcode.3mf"),
+        ("sla-slicer", "is sla, BamBuddy is fdm"),
+        ("preform", "only work with each other"),
+    ):
+        data = {
+            "slicers": {"s": {"kind": slicer, "url": "http://s"}},
+            "targets": {"farm": FARM},
+            "printers": {"p": {"target": "farm", "slicer": "s"}},
+        }
+        with pytest.raises(ConfigError, match=message):
+            _parse(data)

@@ -98,6 +98,27 @@ def test_module_satisfies_both_protocols() -> None:
         BambuddyModule({"url": "http://bb.test"}, key="bambuddy")
 
 
+def test_modules_from_a_legacy_config(cfg) -> None:  # type: ignore[no-untyped-def]
+    fake = FakeBambuddy()
+    asked: list[str] = []
+    mods = registry.Modules.from_config(
+        cfg, secrets=lambda n: asked.append(n) or "k", transport=httpx.MockTransport(fake)
+    )
+    assert asked == ["targets.bambuddy.api_key"]
+    assert mods.slicers["bambuddy"] is mods.targets["bambuddy"]  # role "both": one instance
+    printers = mods.printers()
+    assert [p.key for p in printers] == ["bambuddy/1", "bambuddy/2", "bambuddy/5", "bambuddy/3"]
+    assert mods.find(None, printers).name == "A1 Mini"  # default_printer
+    assert mods.find("bambuddy/2", printers).name == mods.find("X1C_01", printers).name
+    with pytest.raises(BadRequest, match="No active printer"):
+        mods.find("Old", printers)
+    a1 = mods.find("A1 Mini", printers)
+    assert mods.slicer_for(a1) is mods.target_for(a1) and not mods.starts(a1)
+    assert mods.ui_links("localhost:8765") == [("BamBuddy", "http://localhost:8000/queue")]
+    with pytest.raises(AuthError):
+        registry.Modules.from_config(cfg, secrets=lambda n: None)
+
+
 # -- BamBuddy as a target ---------------------------------------------------------
 
 
