@@ -1,0 +1,36 @@
+# Home Assistant local add-on: Bambu Studio in the browser (one shared session).
+# Deployed to /local_apps/bambustudio_web by scripts/deploy_addon.sh. See docs/DECISIONS.md D-21.
+name: Bambu Studio (web)
+version: "2.8.4-13"
+slug: bambustudio_web
+description: Bambu Studio in a browser tab, served from this machine (one shared session)
+arch:
+  - amd64
+startup: application
+boot: auto
+init: false  # the linuxserver image brings its own s6-overlay init
+ports:
+  3001/tcp: 3443  # host port; 3001 is taken by the Bambu Studio API add-on
+ports_description:
+  3001/tcp: Bambu Studio web desktop (HTTPS)
+map:
+  - type: addon_config  # becomes /config, the app's home: settings, presets, logins persist
+    read_only: false
+  - type: share  # /share/os2slice/inbox: files os2slice hands over
+    read_only: false
+  - type: ssl
+    read_only: true
+# No GPU: with /dev/dri the stream (GL render + VAAPI zero-copy on the UHD 620) came out
+# black in Firefox and Chrome. Software rendering + CPU encoding works (tested).
+video: false
+# Docker's default AppArmor profile (silent deny rules) makes Bambu Studio abort at start
+# (SIGABRT; kernel audit ANOM_ABEND) on HAOS. Unconfined it runs (verified 2026-10-01).
+apparmor: false
+options:
+  password: ""
+  # BamBuddy, for its virtual-printer CA (BamBuddy uses host networking; 172.30.32.1 is
+  # the host as seen from add-ons). Empty: virtual printers stay untrusted.
+  bambuddy_url: "http://172.30.32.1:8000"
+schema:
+  password: password?
+  bambuddy_url: url?

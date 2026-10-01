@@ -1,0 +1,68 @@
+# ~/.config/os2slice/config.toml
+
+[onshape]
+base_url = "https://cad.onshape.com"   # must be https://*.onshape.com
+
+[server]
+port = 8765            # the Onshape extension Action URLs must use the same port
+
+[export]
+dir = "~/OnshapeExports"
+format = "stl"          # stl | 3mf | step   (3mf/step: Phase 4)
+units = "millimeter"
+keep_days = 30          # prune older exports; 0 = never
+
+# One table per slicer. The key is what the Onshape extension passes as ?slicer=
+# argv is a list; "{file}" is replaced with the exported path (appended if absent).
+
+[slicers.orca]
+name = "OrcaSlicer"
+argv = ["flatpak", "run", "--file-forwarding", "com.orcaslicer.OrcaSlicer", "@@", "{file}", "@@"]
+# AppImage: argv = ["/home/you/Applications/OrcaSlicer.AppImage", "{file}"]
+
+[slicers.bambu]
+name = "Bambu Studio"
+argv = ["bambu-studio", "{file}"]
+# Flatpak: argv = ["flatpak", "run", "--file-forwarding", "com.bambulab.BambuStudio", "@@", "{file}", "@@"]
+
+[slicers.prusa]
+name = "PrusaSlicer"
+argv = ["flatpak", "run", "--file-forwarding", "com.prusa3d.PrusaSlicer", "--single-instance", "@@", "{file}", "@@"]
+# Native: argv = ["prusa-slicer", "--single-instance", "{file}"]
+
+# PreForm has no Linux support (docs/DECISIONS.md D-2). Windows example (Phase 4):
+# [slicers.preform]
+# name = "PreForm"
+# argv = ["C:/Program Files/Formlabs/PreForm/PreForm.exe", "{file}", "--silentRepair", "--modelUnits", "mm"]
+
+# ---- BamBuddy printing (docs/BAMBUDDY_API.md) ----
+
+[bambuddy]
+base_url = "http://homeassistant:8000"   # on the NUC itself: http://127.0.0.1:8000
+folder = "Onshape"                       # library folder; one subfolder per document
+default_printer = "A1 Mini"              # BamBuddy printer name
+manual_start = true                      # queue items wait for Start in BamBuddy (D-13)
+
+# Slicer presets per BamBuddy printer *model* (GET /api/v1/slicer/presets lists names).
+[bambuddy.presets."A1 Mini"]
+printer = "Bambu Lab A1 mini 0.4 nozzle"
+process = "0.20mm Standard @BBL A1M"
+filament = "Bambu PLA Basic @BBL A1M"
+
+[bambuddy.presets.X1C]
+printer = "Bambu Lab X1 Carbon 0.4 nozzle"
+process = "0.20mm Standard @BBL X1C"
+filament = "Bambu PLA Basic @BBL X1C"
+
+[bambuddy.presets.H2D]
+printer = "Bambu Lab H2D 0.4 nozzle"
+process = "0.20mm Standard @BBL H2D"
+filament = "Bambu PLA Basic @BBL H2D"
+
+# Starting values for the settings you can change per print.
+[print_defaults]
+walls = 2
+infill = 15             # percent
+supports = "off"        # off | normal | tree
+build_plate_only = false
+bed_type = "High Temp Plate"   # smooth PEI; per-model [bambuddy.presets.*] bed_type wins

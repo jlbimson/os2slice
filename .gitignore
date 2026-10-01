@@ -1,0 +1,25 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+*.env
+.env*
+secrets*
+*.stl
+*.3mf
+*.step
+*.stp
+scripts/bambuddy_openapi.json
+*.crt
+
+# local tool state
+.claude/*.lock
+result.json
+
+# working notes kept out of the public repo
+CLAUDE.md
+docs/PLAN.md

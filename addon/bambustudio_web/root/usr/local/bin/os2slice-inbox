@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""Open files os2slice drops in /share/os2slice/inbox, and report who's viewing.
+
+Every few seconds:
+- writes /share/os2slice/web-studio.json: {"viewers": n, "updated": unix time}
+  (n = browser connections to the Selkies stream on 127.0.0.1:8082);
+- moves each finished *.3mf from the inbox into /config/os2slice-files and opens
+  it in the running Bambu Studio (single instance, so it joins the open window).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+INBOX = Path("/share/os2slice/inbox")
+STATUS = Path("/share/os2slice/web-studio.json")
+PROCS = Path("/share/os2slice/web-studio-processes.txt")  # diagnostics, refreshed every 30 s
+APP_LOG = Path("/share/os2slice/web-studio-app.log")  # Bambu Studio's own output
+DIAG = Path("/share/os2slice/web-studio-diag.txt")  # handoff diagnostics, after each launch
+SESSION_VARS = ("WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
+                "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP", "LANG", "PATH")  # fmt: skip
+RESTART_AFTER = 20  # seconds the desktop runs without Bambu Studio before we start it
+KEEP = Path("/config/os2slice-files")
+CONF = Path("/config/.config/BambuStudioBeta/BambuStudio.conf")
+APP = "/opt/bambustudio/AppRun"
+KEEP_DAYS = 7
+
+
+def viewers() -> int:
+    out = subprocess.run(
+        ["ss", "-Htn", "state", "established", "( sport = :8082 )"],
+        capture_output=True, text=True, check=False,
+    ).stdout
+    return sum(1 for line in out.splitlines() if line.strip())
+
+
+def app_running() -> bool:
+    out = subprocess.run(["pgrep", "-f", "bin/bambu-studio"], capture_output=True, check=False)
+    return out.returncode == 0
+
+
+def write_status(n: int) -> None:
+    tmp = STATUS.with_suffix(".tmp")
+    data = {"viewers": n, "app_running": app_running(), "updated": int(time.time())}
+    tmp.write_text(json.dumps(data))
+    os.replace(tmp, STATUS)
+
+
+def write_processes() -> None:
+    out = subprocess.run(
+        ["ps", "-eo", "pid,etimes,rss,args"], capture_output=True, text=True, check=False
+    ).stdout
+    PROCS.write_text(out[:20000])
+
+
+def set_single_instance() -> None:
+    if not CONF.exists():
+        return  # first run: the app writes it; next start sets the flag
+    try:
+        data = json.loads(CONF.read_text())
+        if data.setdefault("app", {}).get("single_instance") is not True:
+            data["app"]["single_instance"] = True
+            CONF.write_text(json.dumps(data, indent=4))
+            shutil.chown(CONF, "abc", "abc")
+    except (ValueError, OSError) as e:
+        print(f"os2slice-inbox: can't set single_instance: {e}", flush=True)
+
+
+def session_bus() -> str | None:
+    """The session bus the running Bambu Studio joined (via D-Bus X11 autolaunch).
+
+    Bambu Studio hands a second launch's files to the open window over this bus.
+    A launch from here can't autolaunch-find it (dbus-launch fails to reach the X
+    display), but autolaunch also records the address in ~/.dbus/session-bus.
+    """
+    files = sorted(Path("/config/.dbus/session-bus").glob("*-0"), key=lambda f: f.stat().st_mtime)
+    for line in files[-1].read_text().splitlines() if files else []:
+        if line.startswith("DBUS_SESSION_BUS_ADDRESS="):
+            return line.split("=", 1)[1].strip().strip("'")
+    return None
+
+
+def session_env() -> dict[str, str] | None:
+    """The desktop session's environment, copied from the running labwc compositor.
+
+    Read as user abc: root in an unprivileged container can't read another user's
+    /proc/<pid>/environ. In this Wayland image the app's display is :0 on wayland-0,
+    not the image's DISPLAY=:1.
+    """
+    pid = subprocess.run(["pgrep", "-x", "labwc"], capture_output=True, text=True).stdout.split()
+    if not pid:
+        return None
+    raw = subprocess.run(
+        ["s6-setuidgid", "abc", "cat", f"/proc/{pid[0]}/environ"], capture_output=True, check=False
+    ).stdout
+    found = dict(
+        item.split("=", 1) for item in raw.decode(errors="replace").split("\0") if "=" in item
+    )
+    env = {k: found[k] for k in SESSION_VARS if k in found}
+    env["HOME"] = "/config"
+    if "DBUS_SESSION_BUS_ADDRESS" not in env and (bus := session_bus()):
+        env["DBUS_SESSION_BUS_ADDRESS"] = bus
+    return env if "WAYLAND_DISPLAY" in env or "DISPLAY" in env else None
+
+
+def _sh(cmd: str, env: dict[str, str] | None = None) -> str:
+    r = subprocess.run(["s6-setuidgid", "abc", "sh", "-c", cmd], capture_output=True,
+                       text=True, env=env, check=False, timeout=20)  # fmt: skip
+    return (r.stdout + r.stderr)[-6000:]
+
+
+def diagnose(env: dict[str, str]) -> None:
+    """Why a launch didn't reach the open window: config, D-Bus, Bambu Studio's logs."""
+    time.sleep(6)
+    pid = subprocess.run(["pgrep", "-of", "bin/bambu-studio"], capture_output=True, text=True)
+    first = pid.stdout.split()[0] if pid.stdout.split() else ""
+    parts = [
+        f"=== {time.ctime()}",
+        "--- config dirs\n" + _sh("ls -d /config/.config/Bambu* 2>&1"),
+        "--- single_instance\n" + _sh("grep -H single_instance /config/.config/Bambu*/*.conf"),
+        "--- dbus files\n" + _sh("ls -la /config/.dbus/session-bus 2>&1; cat /config/.dbus/session-bus/* 2>&1"),
+        f"--- env keys of bambu-studio {first}\n"
+        + _sh(f"tr '\\0' '\\n' < /proc/{first}/environ | grep -E '^(DBUS|DISPLAY|WAYLAND|XDG)'"),
+        "--- dbus names (launch env)\n" + _sh(
+            "dbus-send --session --print-reply --dest=org.freedesktop.DBus / "
+            "org.freedesktop.DBus.ListNames 2>&1 | grep -i -E 'string|error'", env),
+        "--- newest log lines\n" + _sh(
+            "for f in $(ls -t /config/.config/Bambu*/log/* 2>/dev/null | head -2); do "
+            "echo \"## $f\"; grep -i -E 'instance|dbus|message|load|error' \"$f\" | tail -40; done"),
+    ]
+    DIAG.write_text("\n".join(parts) + "\n")
+
+
+def launch(args: list[str]) -> bool:
+    env = session_env()
+    if env is None:
+        print("os2slice-inbox: no desktop session yet", flush=True)
+        return False
+    with APP_LOG.open("ab") as log:
+        log.write(f"\n--- {time.ctime()} launching {args} with {sorted(env)}\n".encode())
+        # Wrapped so the exit status ends up in the log too (diagnosing silent exits).
+        quoted = " ".join(["'" + x.replace("'", "'\\''") + "'" for x in [APP, *args]])
+        subprocess.Popen(
+            ["s6-setuidgid", "abc", "sh", "-c", f'{quoted}; echo "--- exited with status $?"'],
+            env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    if args:
+        threading.Thread(target=diagnose, args=(env,), daemon=True).start()
+    return True
+
+
+def open_file(path: Path) -> None:
+    if launch([str(path)]):
+        print(f"os2slice-inbox: opened {path.name}", flush=True)
+
+
+def take_inbox() -> None:
+    for f in sorted(INBOX.glob("*.3mf")):
+        if not f.is_file() or f.is_symlink():
+            continue
+        dest = KEEP / f.name
+        shutil.move(str(f), dest)
+        shutil.chown(dest, "abc", "abc")
+        open_file(dest)
+
+
+def prune() -> None:
+    cutoff = time.time() - KEEP_DAYS * 86400
+    for f in KEEP.glob("*.3mf"):
+        if f.stat().st_mtime < cutoff:
+            f.unlink(missing_ok=True)
+
+
+def main() -> int:
+    if "--set-single-instance" in sys.argv:
+        set_single_instance()
+        return 0
+    INBOX.mkdir(parents=True, exist_ok=True)
+    KEEP.mkdir(parents=True, exist_ok=True)
+    last_prune = 0.0
+    last_ps = 0.0
+    missing_since: float | None = None
+    while True:
+        try:
+            # Watchdog: keep Bambu Studio running on the desktop.
+            if app_running() or not session_env():
+                missing_since = None
+            elif missing_since is None:
+                missing_since = time.time()
+            elif time.time() - missing_since > RESTART_AFTER:
+                print("os2slice-inbox: Bambu Studio isn't running; starting it", flush=True)
+                launch([])
+                missing_since = time.time() + 40  # give it time to come up
+            write_status(viewers())
+            if time.time() - last_ps > 30:
+                write_processes()
+                last_ps = time.time()
+            take_inbox()
+            if time.time() - last_prune > 3600:
+                prune()
+                last_prune = time.time()
+        except OSError as e:
+            print(f"os2slice-inbox: {e}", flush=True)
+        time.sleep(2)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

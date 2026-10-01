@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <title>os2slice</title>
+  <rect width="64" height="64" rx="12" fill="#0b6bcb"/>
+  <!-- nozzle -->
+  <path d="M24 8h16v8l-5 7h-6l-5-7z" fill="#fff"/>
+  <path d="M30 23h4v4h-4z" fill="#fff"/>
+  <!-- printed layers -->
+  <rect x="17" y="32" width="30" height="5" rx="1.5" fill="#fff" opacity=".95"/>
+  <rect x="15" y="39" width="34" height="5" rx="1.5" fill="#fff" opacity=".8"/>
+  <rect x="13" y="46" width="38" height="5" rx="1.5" fill="#fff" opacity=".65"/>
+  <!-- bed -->
+  <rect x="8" y="54" width="48" height="3" rx="1.5" fill="#fff" opacity=".45"/>
+</svg>

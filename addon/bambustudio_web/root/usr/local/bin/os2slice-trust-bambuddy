@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Make this Bambu Studio trust BamBuddy's virtual printers (BamBuddy wiki: Certificate
+Installation): append BamBuddy's virtual-printer CA to Bambu Studio's printer.cer.
+
+The CA comes from BamBuddy's API (GET /api/v1/virtual-printers/ca-certificate, public
+certificate only). Runs at every container start; appends at most once per container.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+import time
+import urllib.request
+
+PRINTER_CER = "/opt/bambustudio/resources/cert/printer.cer"
+PEM_RE = re.compile(
+    r"-----BEGIN CERTIFICATE-----\n(?:[A-Za-z0-9+/=]{1,76}\n)+-----END CERTIFICATE-----\n?"
+)
+
+
+def fetch(url: str) -> str:
+    with urllib.request.urlopen(f"{url}/api/v1/virtual-printers/ca-certificate", timeout=10) as r:
+        pem = json.load(r)["pem"]
+    if not isinstance(pem, str) or not PEM_RE.fullmatch(pem):
+        raise ValueError("BamBuddy's answer isn't a single PEM certificate")
+    return pem if pem.endswith("\n") else pem + "\n"
+
+
+def main() -> int:
+    url = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else ""
+    if not re.fullmatch(r"https?://[A-Za-z0-9.\-]+(:\d+)?", url):
+        print("os2slice: no valid bambuddy_url; virtual printers won't be trusted", flush=True)
+        return 0
+    for attempt in range(10):
+        try:
+            pem = fetch(url)
+            break
+        except (OSError, ValueError, KeyError) as e:
+            if attempt == 9:
+                print(f"os2slice: can't get BamBuddy's virtual-printer CA: {e}", flush=True)
+                return 0
+            time.sleep(3)
+    with open(PRINTER_CER, encoding="ascii") as f:
+        current = f.read()
+    if pem.strip() in current:
+        print("os2slice: BamBuddy's virtual-printer CA is already trusted", flush=True)
+        return 0
+    with open(PRINTER_CER, "a", encoding="ascii") as f:
+        f.write(("" if current.endswith("\n") else "\n") + pem)
+    print("os2slice: Bambu Studio now trusts BamBuddy's virtual printers", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

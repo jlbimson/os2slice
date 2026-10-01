@@ -1,0 +1,82 @@
+# Home Assistant local add-on (deployed to /local_apps/os2slice by scripts/deploy_addon.sh).
+name: os2slice
+version: "0.1.0"
+slug: os2slice
+description: Print Onshape parts through BamBuddy, with orientation and settings (LAN only)
+arch:
+  - amd64
+startup: application
+boot: auto
+# Own network namespace, not the host's (D-12): only the HTTPS port is published.
+ports:
+  8443/tcp: 8443
+ports_description:
+  8443/tcp: os2slice HTTPS (Onshape extensions point here)
+map:
+  - type: ssl
+    read_only: true
+  - type: share  # /share/os2slice/inbox: hands 3MF files to the Bambu Studio (web) add-on
+    read_only: false
+watchdog: tcp://[HOST]:[PORT:8443]
+options:
+  # "keys": the service reads Onshape with the API key pair below (one account).
+  # "oauth": each user signs in with Onshape (D-23); fill the two oauth fields.
+  onshape_auth: "keys"
+  onshape_access_key: ""
+  onshape_secret_key: ""
+  bambuddy_api_key: ""
+  bambuddy_url: "http://172.30.32.1:8000"
+  hosts:
+    - "print.example.duckdns.org:8443"
+  library_folder: "Onshape"
+  default_printer: "A1 Mini"
+  manual_start: true
+  walls: 2
+  infill: 15
+  supports: "off"
+  build_plate_only: false
+  default_plate: "High Temp Plate"  # smooth PEI (Bambu's name for it)
+  web_studio_url: "https://print.example.duckdns.org:3443"  # the Bambu Studio (web) add-on; "" to hide
+  presets:
+    - model: "A1 Mini"
+      printer: "Bambu Lab A1 mini 0.4 nozzle"
+      process: "0.20mm Standard @BBL A1M"
+      filament: "Bambu PLA Basic @BBL A1M"
+    - model: "X1C"
+      printer: "Bambu Lab X1 Carbon 0.4 nozzle"
+      process: "0.20mm Standard @BBL X1C"
+      filament: "Bambu PLA Basic @BBL X1C"
+    - model: "H2D"
+      printer: "Bambu Lab H2D 0.4 nozzle"
+      process: "0.20mm Standard @BBL H2D"
+      filament: "Bambu PLA Basic @BBL H2D"
+  log_level: "info"
+schema:
+  onshape_auth: list(keys|oauth)?
+  onshape_access_key: password?
+  onshape_secret_key: password?
+  onshape_oauth_client_id: str?
+  onshape_oauth_client_secret: password?
+  bambuddy_api_key: password
+  bambuddy_url: url
+  bambuddy_public_url: url?
+  web_studio_url: url?
+  hosts:
+    - str
+  library_folder: str
+  default_printer: str
+  manual_start: bool
+  walls: int(1,10)
+  infill: int(0,100)
+  supports: list(off|normal|tree)
+  build_plate_only: bool
+  default_plate: str?
+  presets:
+    - model: str
+      printer: str
+      process: str
+      filament: str
+      bed_type: str?
+  certfile: str?
+  keyfile: str?
+  log_level: list(info|debug)

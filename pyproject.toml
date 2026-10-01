@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "os2slice"
+version = "0.1.0"
+description = "Slice and print Onshape parts on Bambu Lab printers through BamBuddy, from inside Onshape."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "jlbimson" }]
+dependencies = [
+    "httpx>=0.27",
+    "keyring>=24",
+    "tomli>=2; python_version < '3.11'",
+]
+
+[project.scripts]
+os2slice = "os2slice.cli:main"
+os2slice-addon = "os2slice.addon:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/os2slice"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF"]
+ignore = ["S603"]  # subprocess with a list argv is the whole point; shell=True (S602) stays banned
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S104", "S105", "S106", "S108", "S501", "S603", "S607"]
+"scripts/**" = ["S", "T20"]
+"src/os2slice/server.py" = ["S608"]  # HTML templates trip the SQL heuristic; values go through html.escape
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not live'"
+markers = ["live: talks to the real Onshape API (needs keys + OS2SLICE_LIVE_URL)"]
