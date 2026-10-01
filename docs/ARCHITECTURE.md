@@ -122,7 +122,7 @@ scripts/          deploy_addon.sh, spikes, one-offs
 ```python
 @dataclass(frozen=True)
 class ExportRequest:
-    slicer: str  # local mode: key into config [slicers.*]; print path: the fixed "bambuddy" (unused)
+    slicer: str  # local mode: a [slicers.*] key; print path: always "bambuddy", unused
     document_id: str
     wvm: Literal["w", "v", "m"]
     wvm_id: str
