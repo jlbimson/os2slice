@@ -30,6 +30,7 @@ from os2slice.filaments import (
     NOZZLE_NAMES,
     Slot,
     color_name,
+    compatible_presets,
     match_preset,
     preset_suffix,
     sliced_nozzle,
@@ -411,7 +412,8 @@ class BambuddyModule:
                         continue
                     states.append(_status_of(raw, ()))
                     for slot in slots_from_status(raw):
-                        k = (slot.material.upper(), slot.color.upper())
+                        colour = slot.color.upper() if slot.color_known else ""
+                        k = (slot.material.upper(), colour)
                         found.setdefault(k, (slot, []))[1].append(pid)
                 if found and suffix:
                     names = self._filament_names(bb)
@@ -421,13 +423,16 @@ class BambuddyModule:
             log.warning("bambuddy %s: no status for %s: %s", self.url, printer.name, e.message)
             return PrinterStatus("offline", False, False, e.message)
         n = len(states)
+        # A tray that reports no colour is offered as "any colour": its type only, so
+        # the job isn't forced onto a made-up grey that no printer has (pool_overrides).
         materials = tuple(
             Material(
-                id=pool_material_id(slot.material, slot.color),
-                label=f"{slot.brand or slot.material} · {color_name(slot.color)}"
-                + (f" (loaded on {len(on)} of {n})" if n > 1 else ""),
+                id=pool_material_id(slot.material, slot.color if slot.color_known else ""),
+                label=f"{slot.brand or slot.material} · "
+                + (color_name(slot.color) if slot.color_known else "any colour")
+                + (f" (loaded on {len(on)} of {n})" if n > 1 else " (loaded)"),
                 kind=slot.material,
-                colour=slot.color,
+                colour=slot.color if slot.color_known else None,
                 profile=match_preset(slot, suffix, names) or "",
                 raw={"type": slot.material, "brand": slot.brand, "printers": tuple(on)},
             )
@@ -444,6 +449,18 @@ class BambuddyModule:
             detail=f"{ready} of {n} free",
             materials=materials,
         )
+
+    def filament_presets(self, printer: PrinterInfo) -> tuple[str, ...]:
+        """For a pool: every filament preset made for its model (by name, D-19), sorted,
+        from the cached preset list. The panel offers them after the loaded filaments;
+        one is sliced with as is and queued without a filament override, so BamBuddy
+        matches its type from the file. Empty for a single printer."""
+        if not printer.pool:
+            return ()
+        suffix = preset_suffix(printer.profiles.filament)
+        with self.client() as bb:
+            names = self._filament_names(bb)
+        return tuple(compatible_presets(names, suffix, printer.profiles.printer))
 
     def submit(
         self,
@@ -557,9 +574,10 @@ def _status_of(raw: Mapping[str, Any], materials: tuple[Material, ...]) -> Print
 
 def pool_material_id(kind: str, colour: str) -> str:
     """A pool's material id, "<TYPE>.<RRGGBB>" (the server's MATERIAL_ID shape): what is
-    wanted, not where it's loaded. Stable while the type and colour are."""
+    wanted, not where it's loaded. Stable while the type and colour are. No colour (a
+    tray that reports none): "<TYPE>.ANY"."""
     safe = re.sub(r"[^A-Za-z0-9_-]", "_", kind.upper())[:24] or "X"
-    return f"{safe}.{colour.lstrip('#').upper()[:6]}"
+    return f"{safe}.{colour.lstrip('#').upper()[:6] or 'ANY'}"
 
 
 def pool_overrides(materials: tuple[Material, ...]) -> list[dict[str, Any]]:
@@ -576,8 +594,8 @@ def pool_overrides(materials: tuple[Material, ...]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for n, m in enumerate(materials, start=1):
         kind = str(m.raw.get("type") or m.kind)
-        if not kind or not m.colour:
-            continue
+        if m.raw.get("preset") or not kind or not m.colour:
+            continue  # a preset, not a loaded filament: BamBuddy matches the file's type
         out.append(
             {
                 "slot_id": n,

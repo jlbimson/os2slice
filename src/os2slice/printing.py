@@ -18,6 +18,7 @@ from datetime import datetime
 from os2slice import files
 from os2slice.config import Config
 from os2slice.errors import BadRequest, ConfigError
+from os2slice.filaments import preset_label
 from os2slice.modules import bambu_project
 from os2slice.modules.base import (
     MEDIA_GCODE_3MF,
@@ -199,7 +200,10 @@ def has_profiles(printer: PrinterInfo) -> bool:
 
 
 def materials_of(
-    printer: PrinterInfo, status: PrinterStatus, own: ProfileCatalog | None = None
+    printer: PrinterInfo,
+    status: PrinterStatus,
+    own: ProfileCatalog | None = None,
+    presets: tuple[str, ...] = (),
 ) -> tuple[Material, ...]:
     """What the printer has loaded; when the target can't tell, its configured materials,
     else the user's own filament profiles in its slicer (`own`), one choice each.
@@ -207,8 +211,13 @@ def materials_of(
     Loaded materials without a profile get the user's best match (`match_profile`). A
     filament changer's tools (Material.raw["tool"]) come first, then the own profiles,
     for prints that don't use the changer.
+
+    A printer pool also offers `presets` (Modules.pool_presets) after what is loaded:
+    filament presets nobody has to have loaded (Material.raw["preset"]).
     """
     loaded = status.materials or printer.materials
+    if printer.pool:
+        return loaded + tuple(preset_material(name) for name in presets)
     if own is not None and own.filament_types:
         loaded = tuple(
             m
@@ -268,6 +277,17 @@ def profile_material(profile: str, colour: str | None = None) -> Material:
     return Material(id=f"f-{digest}", label=profile, colour=colour, profile=profile)
 
 
+def preset_material(profile: str) -> Material:
+    """A pool's filament preset offered as a material: sliced with as is, no colour, and
+    queued without a filament override (BamBuddy matches the file's filament type)."""
+    m = profile_material(profile)
+    return replace(m, label=preset_label(profile), raw={"preset": True})
+
+
+def is_preset(material: Material) -> bool:
+    return bool(material.raw.get("preset"))
+
+
 def usable(material: Material, printer: PrinterInfo) -> bool:
     """A material can be printed from once it has a profile and, with two nozzles, a nozzle."""
     return bool(material.profile) and (
@@ -323,7 +343,7 @@ def plan_print(
     target = modules.target_for(chosen)
     status = target.status(chosen)
     own = modules.own_profiles(chosen)
-    loaded = {m.id: m for m in materials_of(chosen, status, own)}
+    loaded = {m.id: m for m in materials_of(chosen, status, own, modules.pool_presets(chosen))}
     dual = chosen.nozzle_count > 1
 
     def resolve(mid: str) -> Material:

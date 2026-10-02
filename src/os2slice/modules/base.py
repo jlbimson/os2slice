@@ -316,4 +316,7 @@ def distinct_materials(parts: tuple[PartGeometry, ...]) -> tuple[Material, ...]:
 # Optional on a target: `ui_url`, a method `(request_host: str = "") -> str` or a plain
 # str attribute: the page where a person watches the queue, for links that belong to no
 # single printer (the panel, job pages).
+# Optional on a target that offers printer pools: `filament_presets(printer) ->
+# tuple[str, ...]`, the filament presets a pool offers besides what is loaded
+# (Modules.pool_presets; BamBuddy: every preset made for the model).
 Factory = Callable[..., Any]

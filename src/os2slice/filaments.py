@@ -48,6 +48,7 @@ class Slot:
     color: str  # "#RRGGBB"
     brand: str = ""  # tray_sub_brands, e.g. "Support for ABS"
     extruder: int | None = None  # dual-nozzle printers only: the physical nozzle it feeds
+    color_known: bool = True  # False: the tray reported no colour, `color` is a grey stand-in
 
     @property
     def external(self) -> bool:
@@ -106,7 +107,8 @@ def _int(value: Any) -> int | None:
 
 def _slot(gid: int, label: str, tray: dict[str, Any], extruder: int | None = None) -> Slot:
     raw = str(tray.get("tray_color") or "")
-    color = f"#{raw[:6].upper()}" if re.fullmatch(r"[0-9A-Fa-f]{6,8}", raw) else "#808080"
+    known = re.fullmatch(r"[0-9A-Fa-f]{6,8}", raw) is not None
+    color = f"#{raw[:6].upper()}" if known else "#808080"
     return Slot(
         gid,
         label,
@@ -114,6 +116,7 @@ def _slot(gid: int, label: str, tray: dict[str, Any], extruder: int | None = Non
         color,
         str(tray.get("tray_sub_brands") or "").strip(),
         extruder,
+        known,
     )
 
 
@@ -162,6 +165,23 @@ def color_name(hex_color: str) -> str:
 def preset_suffix(filament_preset: str) -> str:
     """'Bambu PLA Basic @BBL A1M' → '@BBL A1M' (the printer part of Bambu preset names)."""
     return filament_preset[filament_preset.rfind("@") :] if "@" in filament_preset else ""
+
+
+def compatible_presets(names: list[str], suffix: str, printer_preset: str = "") -> list[str]:
+    """The filament presets made for one printer model, by name: Bambu's own end in its
+    code ("Generic PETG @BBL A1M" for '@BBL A1M'), presets saved in Bambu Studio usually
+    in the printer preset's name ("My PETG @Bambu Lab A1 mini 0.4 nozzle"). Sorted by
+    name without that suffix, each name once."""
+    ends = tuple(f" {e}" for e in (suffix, f"@{printer_preset}" if printer_preset else "") if e)
+    if not ends:
+        return []
+    found = {n for n in names if n.endswith(ends)}
+    return sorted(found, key=lambda n: (preset_label(n).casefold(), n))
+
+
+def preset_label(name: str) -> str:
+    """'Generic PETG @BBL A1M' → 'Generic PETG': a preset's name without its printer part."""
+    return name[: name.rfind(" @")].strip() if " @" in name else name
 
 
 def match_preset(slot: Slot, suffix: str, names: list[str]) -> str | None:

@@ -725,7 +725,7 @@ class _Handler(BaseHTTPRequestHandler):
                 continue
             status = mods.target_for(p).status(p)
             own = mods.own_profiles(p)
-            materials = printing.materials_of(p, status, own)
+            materials = printing.materials_of(p, status, own, mods.pool_presets(p))
             views.append(PrinterView(p, _state(status), True, materials, own.process,
                                      own.printer, own.mmu_printers))  # fmt: skip
         return views
@@ -1266,8 +1266,9 @@ def _printer_choice(printer: str, filament: str, tool: str = "") -> tuple[str, s
 
 
 def _material_label(m: Material, printer: PrinterInfo) -> tuple[str, bool]:
-    """(menu label, disabled) for a loaded material."""
-    if printer.nozzle_count > 1 and m.extruder is None:
+    """(menu label, disabled) for a loaded material. A pool's materials have no nozzle
+    (BamBuddy picks the printer, and so the trays, at dispatch): they stay usable."""
+    if printer.nozzle_count > 1 and m.extruder is None and not printer.pool:
         return f"{m.label} (nozzle unknown)", True
     if m.raw.get("empty"):
         return m.label, True  # an empty changer gate: "T3: empty"
@@ -1277,9 +1278,12 @@ def _material_label(m: Material, printer: PrinterInfo) -> tuple[str, bool]:
 
 
 def _default_choice(view: PrinterView) -> str:
-    """Prefer a loaded material of the configured kind, then a lone one, then the preset."""
+    """Prefer a loaded material of the configured kind, then a lone one, then the preset.
+    A pool's presets (not loaded anywhere) are never the default."""
     key = view.printer.key
-    usable = [m for m in view.materials if printing.usable(m, view.printer)]
+    usable = [
+        m for m in view.materials if printing.usable(m, view.printer) and not printing.is_preset(m)
+    ]
     if not usable or not view.configured:
         return key
     for m in usable:
@@ -1303,8 +1307,11 @@ def _printer_select(views: list[PrinterView], default_printer: str) -> str:
             continue
         name, key = v.printer.name, v.printer.key
         preset_label = v.printer.profiles.filament.split(" @")[0]
-        opts = [(key, f"{name} · preset filament ({preset_label})", "", False)]
-        for m in v.materials:
+        opts = []
+        for m in _menu_order(v):
+            if m is None:
+                opts.append((key, f"{name} · preset filament ({preset_label})", "", False))
+                continue
             label, disabled = _material_label(m, v.printer)
             opts.append((f"{key}|{m.id}", f"{name} · {label}", m.colour or "", disabled))
         html_opts = "".join(
@@ -1330,20 +1337,42 @@ def _printer_select(views: list[PrinterView], default_printer: str) -> str:
     )
 
 
+def _menu_order(v: PrinterView) -> list[Material | None]:
+    """A printer's filament menu in order; None is the configured preset filament.
+
+    A printer: the preset, then each material. A pool: the filaments loaded across its
+    printers, then every preset made for the model by name, the configured one (None)
+    in its place among them, or first when it isn't one of them.
+    """
+    if not v.printer.pool:
+        return [None, *v.materials]
+    loaded = [m for m in v.materials if not printing.is_preset(m)]
+    configured = v.printer.profiles.filament
+    presets: list[Material | None] = [
+        None if m.profile == configured else m for m in v.materials if printing.is_preset(m)
+    ]
+    if None not in presets:
+        presets.insert(0, None)
+    return [*loaded, *presets]
+
+
 def _filament_choices(v: PrinterView) -> list[dict[str, Any]]:
-    """The panel's filament menu for one printer: the preset filament, then each material."""
+    """The panel's filament menu for one printer (`_menu_order`)."""
     default = _split_printer(_default_choice(v))[1]
     preset_label = v.printer.profiles.filament.split(" @")[0]
-    out: list[dict[str, Any]] = [
-        {
-            "value": "",
-            "label": f"Preset filament ({preset_label})",
-            "default": default is None,
-            "tool": False,
-            "profile": v.printer.profiles.filament,
-        }
-    ]
-    for m in v.materials:
+    out: list[dict[str, Any]] = []
+    for m in _menu_order(v):
+        if m is None:
+            out.append(
+                {
+                    "value": "",
+                    "label": f"Preset filament ({preset_label})",
+                    "default": default is None,
+                    "tool": False,
+                    "profile": v.printer.profiles.filament,
+                }
+            )
+            continue
         label, disabled = _material_label(m, v.printer)
         tool = printing.is_tool(m)
         if tool and m.profile and not m.raw.get("empty"):

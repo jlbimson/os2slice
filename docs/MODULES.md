@@ -109,14 +109,28 @@ slicer = "orca-api"              # any of: slicer, profiles (per field), bed_mm,
   the model's slicer, profiles, bed and nozzle count, and `extra.target_model`; it is
   active when any printer of the model is. Its status is ready when any of them is, and
   its materials are the distinct loaded (type, colour) pairs across them, with ids
-  `<TYPE>.<RRGGBB>` (no tray ids). Submitting queues with `target_model` and
-  `filament_overrides` (`force_color_match` per chosen filament, `slot_id` = filament
-  n) and no `printer_id` or `ams_mapping`: BamBuddy's scheduler dispatches it to the
-  first idle printer of that model with every filament loaded and maps its trays
-  itself. On dual-nozzle models (H2D) the pool's materials have no nozzle: the project
-  gets no Manual filament map (the slicer chooses), and the check that each filament
-  prints on the nozzle its slot feeds is skipped. A `[printers."Any <model>"]` entry
-  overrides a pool like any discovered printer.
+  `<TYPE>.<RRGGBB>` (no tray ids; `<TYPE>.ANY` for a tray that reports no colour).
+  Submitting queues with `target_model` and `filament_overrides` (`force_color_match`
+  per chosen filament with a type and colour, `slot_id` = filament n) and no
+  `printer_id` or `ams_mapping`: BamBuddy's scheduler dispatches it to the first idle
+  printer of that model with every filament loaded and maps its trays itself. On
+  dual-nozzle models (H2D) the pool's materials have no nozzle: they stay selectable,
+  the project gets no Manual filament map (the slicer chooses), and the check that
+  each filament prints on the nozzle its slot feeds is skipped. A
+  `[printers."Any <model>"]` entry overrides a pool like any discovered printer.
+- A pool's filament menu (panel and page): first the loaded (type, colour) pairs,
+  labelled "PETG · black (loaded)" ("(loaded on 1 of 2)" with several printers), each
+  matched to its preset by name (D-19); then every filament preset made for the model,
+  sorted and labelled without the suffix: BamBuddy's cached preset names ending in the
+  configured filament's `@BBL <code>` or in `@<printer preset>` (Bambu Studio's name
+  for a saved user preset), from the target's optional `filament_presets(printer)`
+  (`Modules.pool_presets`, empty when unreadable). The configured preset is the
+  "Preset filament (…)" entry (value `""`) in its place among them; it is the default
+  unless a filament is loaded (then `_default_choice` picks as for a printer). A preset
+  choice has the id `f-<sha256[:12]>` (`printing.preset_material`, `Material.raw
+  ["preset"]`): the slice uses that preset and no colour, and the queue item gets no
+  `filament_overrides` entry for it, so BamBuddy dispatches on the filament type in the
+  sliced file. A loaded choice forces its type and colour as above.
 - Module field values are validated against the kind's `ModuleSpec.fields` (type,
   required, default); unknown keys and secrets in the file are refused.
 

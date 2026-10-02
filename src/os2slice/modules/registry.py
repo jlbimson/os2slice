@@ -279,6 +279,21 @@ class Modules:
             log.warning("%s: own profiles unreadable: %s", printer.slicer, e.one_line())
             return ProfileCatalog()
 
+    def pool_presets(self, printer: PrinterInfo) -> tuple[str, ...]:
+        """For a printer pool: the filament presets its target offers besides what is
+        loaded (BamBuddy: every preset made for the model). Empty for other printers,
+        targets without the method, or when they can't be read."""
+        if not printer.pool:
+            return ()
+        presets = getattr(self.targets.get(printer.target), "filament_presets", None)
+        if presets is None:
+            return ()
+        try:
+            return tuple(presets(printer))
+        except ModuleError as e:
+            log.warning("%s: filament presets unreadable: %s", printer.target, e.one_line())
+            return ()
+
     def waits(self, printer: PrinterInfo) -> bool:
         """The default of the Wait for Start toggle for this printer: its target's
         `manual_start` (the person printing chooses per print, D-13)."""
