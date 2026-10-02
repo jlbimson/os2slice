@@ -123,13 +123,15 @@ def test_modules_from_a_legacy_config(cfg) -> None:  # type: ignore[no-untyped-d
     assert asked == ["targets.bambuddy.api_key"]
     assert mods.slicers["bambuddy"] is mods.targets["bambuddy"]  # role "both": one instance
     printers = mods.printers()
-    assert [p.key for p in printers] == ["bambuddy/1", "bambuddy/2", "bambuddy/5", "bambuddy/3"]
+    assert [p.key for p in printers] == [
+        "bambuddy/1", "bambuddy/2", "bambuddy/5", "bambuddy/3", "bambuddy/any:A1 Mini",
+    ]  # fmt: skip
     assert mods.find(None, printers).name == "A1 Mini"  # default_printer
     assert mods.find("bambuddy/2", printers).name == mods.find("X1C_01", printers).name
     with pytest.raises(BadRequest, match="No active printer"):
         mods.find("Old", printers)
     a1 = mods.find("A1 Mini", printers)
-    assert mods.slicer_for(a1) is mods.target_for(a1) and not mods.starts(a1)
+    assert mods.slicer_for(a1) is mods.target_for(a1) and not mods.waits(a1)
     assert mods.ui_links("localhost:8765") == [("BamBuddy", "http://localhost:8000/queue")]
     with pytest.raises(AuthError):
         registry.Modules.from_config(cfg, secrets=lambda n: None)

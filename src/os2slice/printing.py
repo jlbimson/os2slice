@@ -134,6 +134,8 @@ class PrintPlan:
             + (
                 f"waits in {self.target_label}'s queue until you press Start"
                 if self.manual_start
+                else f"starts on the first free {self.printer.model} with the filament loaded"
+                if self.printer.pool
                 else "starts as soon as the printer is free"
             ),
         ]
@@ -268,7 +270,9 @@ def profile_material(profile: str, colour: str | None = None) -> Material:
 
 def usable(material: Material, printer: PrinterInfo) -> bool:
     """A material can be printed from once it has a profile and, with two nozzles, a nozzle."""
-    return bool(material.profile) and (printer.nozzle_count <= 1 or material.extruder is not None)
+    return bool(material.profile) and (
+        printer.nozzle_count <= 1 or printer.pool or material.extruder is not None
+    )
 
 
 def media_for(slicer: ModuleSpec, target: ModuleSpec) -> Media:
@@ -292,6 +296,7 @@ def plan_print(
     extra_parts: list[tuple[str, str]] | None = None,
     process: str | None = None,
     machine: str | None = None,
+    manual_start: bool | None = None,
 ) -> PrintPlan:
     """Gather everything for the confirmation. Reads from Onshape and the target only.
 
@@ -301,6 +306,7 @@ def plan_print(
     `extra_parts` makes it a multi-material print: more (part id, material id) pairs
     printed as one object. `process` and `machine` pick one of the user's own process and
     printer profiles in the printer's slicer instead of the configured ones.
+    `manual_start` is the person's Wait for Start choice; None = the target's default.
     """
     if not modules.targets:
         raise ConfigError(
@@ -326,7 +332,7 @@ def plan_print(
         m = loaded.get(mid)
         if m is None:
             raise BadRequest(f"Nothing is loaded in slot {mid} on {chosen.name}")
-        if dual and m.extruder is None:
+        if dual and m.extruder is None and not chosen.pool:
             raise BadRequest(
                 f"Can't tell which nozzle {m.label} on {chosen.name} feeds",
                 "Check the AMS assignment on the printer, or use the preset filament",
@@ -432,7 +438,7 @@ def plan_print(
         profiles=profiles,
         orientation=orientation,
         settings=settings,
-        manual_start=not modules.starts(chosen),
+        manual_start=modules.waits(chosen) if manual_start is None else manual_start,
         target_label=target.spec.label,
         material=first,
         bed_type=check_bed_type(bed_type)

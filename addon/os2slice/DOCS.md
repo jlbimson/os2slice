@@ -1,6 +1,6 @@
 # os2slice
 
-Print Onshape parts from inside Onshape: pick the part, the face it stands on, the printer, the filament, walls, infill and supports, then send it. Each printer has a slicer (BamBuddy itself, or the Bambu Studio API add-on) and a target (BamBuddy's queue; Klipper/Moonraker and PrusaLink printers are built but not yet tested on hardware). Jobs wait until someone starts them (in BamBuddy: Start).
+Print Onshape parts from inside Onshape: pick the part, the face it stands on, the printer, the filament, walls, infill and supports, then send it. Each printer has a slicer (BamBuddy itself, or the Bambu Studio API add-on) and a target (BamBuddy's queue; Klipper/Moonraker and PrusaLink printers are built but not yet tested on hardware). Whoever prints chooses whether the job starts by itself or waits until someone presses Start in BamBuddy (the **Wait for Start** checkbox). Besides each printer, the printer menu offers **Any <model>**: BamBuddy then sends the job to the first idle printer of that model with the chosen filament (type and colour) loaded.
 
 The options below set up one BamBuddy that slices and queues. Other slicers and printers are added on the config page `/admin` (below); [`docs/MODULES.md`](https://github.com/jlbimson/os2slice/blob/main/docs/MODULES.md) explains the modules.
 
@@ -19,7 +19,7 @@ The options below set up one BamBuddy that slices and queues. Other slicers and 
 | `default_printer`, `presets` | BamBuddy printer name, and slicer presets per printer model |
 | `walls`, `infill`, `supports`, `build_plate_only`, `top_layers`, `bottom_layers`, `brim`, `copies` | Starting values shown on the print page |
 | `default_plate` | Build plate used unless a print or a preset's `bed_type` says otherwise. `High Temp Plate` is Bambu's name for smooth PEI |
-| `manual_start` | Keep `true`: queued jobs wait for Start in BamBuddy |
+| `manual_start` | Whether the print page's **Wait for Start** checkbox starts checked. Off (default): prints start by themselves once the printer is free; on: they wait for Start in BamBuddy |
 | `admin_password` | Turns on the config page `/admin` (at least 12 characters); see below |
 | `reset_config` | Leave off. On: the next start writes `config.toml` again from these options, discarding edits made on `/admin`; turn it off again afterwards |
 

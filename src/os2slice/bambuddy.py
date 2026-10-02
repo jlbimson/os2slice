@@ -235,22 +235,40 @@ class BambuddyClient:
     def queue_print(
         self,
         library_file_id: int,
-        printer_id: int,
+        printer_id: int | None,
         manual_start: bool,
         ams_mapping: list[int] | None = None,
         use_ams: bool | None = None,
+        *,
+        target_model: str | None = None,
+        filament_overrides: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Queue a sliced file on one printer. The only call that can lead to a print."""
-        body: dict[str, Any] = {
-            "library_file_id": int(library_file_id),
-            "printer_id": int(printer_id),
-            "manual_start": bool(manual_start),
-        }
+        """Queue a sliced file on one printer, or on any printer of `target_model` (a pool:
+        BamBuddy dispatches it to the first idle printer of that model with the needed
+        filament loaded, and works out the AMS mapping itself; give neither `printer_id`
+        nor `ams_mapping` then). `filament_overrides` are BamBuddy's per-filament entries
+        (`slot_id`, `type`, `color`, `force_color_match`...; docs/BAMBUDDY_API.md).
+
+        The only call that can lead to a print.
+        """
+        if (printer_id is None) == (target_model is None):
+            raise BambuddyError("Queue on one printer or on a printer model, not both/neither")
+        body: dict[str, Any] = {"library_file_id": int(library_file_id)}
+        if printer_id is not None:
+            body["printer_id"] = int(printer_id)
+        else:
+            if ams_mapping is not None or use_ams is not None:
+                raise BambuddyError("BamBuddy maps the AMS itself for a printer model")
+            body["target_model"] = str(target_model)
+        body["manual_start"] = bool(manual_start)
         if ams_mapping is not None:
             body["ams_mapping"] = [int(x) for x in ams_mapping]
         if use_ams is not None:
             body["use_ams"] = bool(use_ams)
-        log.warning("queueing on printer %s: %s", printer_id, body)
+        if filament_overrides:
+            body["filament_overrides"] = [dict(o) for o in filament_overrides]
+        where = f"printer {printer_id}" if printer_id is not None else f"any {target_model}"
+        log.warning("queueing on %s: %s", where, body)
         item = self._json(self._request("POST", "/queue/", json=body))
         return item if isinstance(item, dict) else {}
 

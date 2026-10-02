@@ -30,7 +30,7 @@ options:
     - "print.example.duckdns.org:8443"
   library_folder: "Onshape"
   default_printer: "A1 Mini"
-  manual_start: true
+  manual_start: false
   walls: 2
   infill: 15
   supports: "off"

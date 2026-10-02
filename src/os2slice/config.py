@@ -444,7 +444,7 @@ def _parse_bambuddy(data: dict[str, Any], fail: Any) -> BambuddyConfig:
     default_printer = bb.get("default_printer", "")
     if not isinstance(default_printer, str):
         raise fail("bambuddy.default_printer must be a printer name")
-    manual_start = bb.get("manual_start", True)
+    manual_start = bb.get("manual_start", False)
     if not isinstance(manual_start, bool):
         raise fail("bambuddy.manual_start must be true or false")
     presets: dict[str, PresetChoice] = {}

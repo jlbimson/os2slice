@@ -123,6 +123,10 @@ class PrinterInfo:
     # Configured materials ([printers.<key>] materials), for targets that can't report
     # what's loaded; the filament menu falls back to these when status() has none.
     materials: tuple[Material, ...] = ()
+    # A stand-in for "any printer of this model" (BamBuddy's printer pools): the target
+    # picks the printer when the job can run, so its materials say which filament is
+    # wanted, not where it's loaded, and on dual-nozzle models have no nozzle.
+    pool: bool = False
 
 
 @dataclass(frozen=True)

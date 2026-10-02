@@ -74,7 +74,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pr.add_argument("-c", "--configuration", default="", help="Onshape configuration string")
     pr.add_argument(
-        "--printer", help="printer name or key, e.g. 'X1C_01' or 'bambuddy/2' (default: config)"
+        "--printer",
+        help="printer name or key, e.g. 'X1C_01', 'bambuddy/2', or 'Any X1C' (the first free "
+        "X1C with the filament loaded) (default: config)",
     )
     pr.add_argument(
         "--orient",
@@ -100,6 +102,12 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--copies", help="copies of the part(s) on one plate (1-25)")
     pr.add_argument(
         "--slice-only", action="store_true", help="upload and slice, but don't queue a print"
+    )
+    pr.add_argument(
+        "--wait-for-start",
+        action=argparse.BooleanOptionalAction,
+        help="leave the queued print waiting until someone presses Start (default: the "
+        "target's manual_start setting, which is off: the print starts by itself)",
     )
     pr.set_defaults(func=cmd_print)
 
@@ -211,6 +219,7 @@ def cmd_print(args: argparse.Namespace) -> int:
         plan = printing.plan_print(
             req, cfg, onshape, modules, args.printer, orientation, settings,
             slots[0] if slots else None, args.plate, extra,
+            manual_start=args.wait_for_start,
         )  # fmt: skip
         print("\n".join(plan.summary_lines()))
         queue = not args.slice_only
