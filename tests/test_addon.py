@@ -322,7 +322,7 @@ def test_manifest_has_the_config_page_options() -> None:
     manifest = (root / "addon/os2slice/config.yaml").read_text()
     assert "  admin_password: password?" in manifest
     assert "  reset_config: bool" in manifest and "  reset_config: false" in manifest
-    assert 'version: "0.3.1"' in manifest
+    assert 'version: "0.3.2"' in manifest
     assert "url: https://github.com/jlbimson/os2slice" in manifest
     docs = (root / "addon/os2slice/DOCS.md").read_text()
     for word in ("admin_password", "reset_config", "/admin", "secrets.json"):
