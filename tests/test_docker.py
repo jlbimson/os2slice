@@ -16,7 +16,7 @@ def test_example_config_is_valid_and_matches_the_compose_mounts() -> None:
     assert cfg.server.port == 8443 and cfg.onshape_auth == "oauth"
     compose = (ROOT / "docker-compose.yml").read_text()
     # XDG_CONFIG_HOME=/data in the image, so the config lives at /data/os2slice/config.toml.
-    assert "./docker/config.toml:/data/os2slice/config.toml:ro" in compose
+    assert "./docker/config.toml:/data/os2slice/config.toml  #" in compose  # writable: /admin
     assert "XDG_CONFIG_HOME=/data" in (ROOT / "Dockerfile").read_text()
     assert str(cfg.server.tls_cert).startswith("/certs/") and "./certs:/certs:ro" in compose
     assert cfg.web_studio is not None and str(cfg.web_studio.inbox).startswith("/share/os2slice")

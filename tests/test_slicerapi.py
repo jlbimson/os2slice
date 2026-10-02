@@ -7,6 +7,7 @@ Live: OS2SLICE_LIVE_SLICERAPI_URL=http://127.0.0.1:3001 pytest -q -m live tests/
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 import threading
@@ -102,6 +103,7 @@ def test_specs_two_kinds_one_class() -> None:
             "url": "url",
             "timeout_s": "int",
             "api_key": "secret",
+            "profile_dir": "path",
         }
         assert MODULES[spec.kind].spec is spec
         assert issubclass(MODULES[spec.kind], SlicerApi)
@@ -249,6 +251,114 @@ def test_overrides_passed_through_as_strings() -> None:
     assert process["brim_type"] == "outer_only"
     assert process["wipe_tower_x"] == "70.0" and process["wipe_tower_y"] == "114.7"
     assert process["name"] == process["inherits"] == "0.20mm Standard @BBL A1M"
+
+
+# -- user profiles (profile_dir) -------------------------------------------------------
+
+JOSH = "JoshPrint 0.5 MMU"
+JOSH_PROFILES = Profiles(JOSH, "0.2 Strong", "PM ASA")
+
+
+def user_dir(tmp_path: Path) -> Path:
+    """A user preset folder as OrcaSlicer's GUI keeps it (values from a real export)."""
+    files = {
+        "machine": {
+            "name": JOSH,
+            "inherits": "RatRig V-Core 3 300 0.4 nozzle",
+            "from": "User",
+            "nozzle_diameter": ["0.5"],
+            "machine_start_gcode": "PRINT_WARMUP EXTRUDER_TEMP=[first_layer_temperature]",
+        },
+        "process": {
+            "name": "0.2 Strong",
+            "inherits": "0.20mm Standard @RatRig",
+            "from": "User",
+            "wall_loops": "5",
+            "compatible_printers_condition": "",
+        },
+        "filament": {
+            "name": "PM ASA",
+            "inherits": "RatRig Generic ASA",
+            "from": "User",
+            "nozzle_temperature": ["260"],
+        },
+    }
+    for kind, body in files.items():
+        (tmp_path / kind).mkdir()
+        (tmp_path / kind / f"{body['name']}.json").write_text(json.dumps(body))
+    return tmp_path
+
+
+def test_user_profiles_uploaded_whole_with_overrides(tmp_path: Path) -> None:
+    fake = FakeSidecar("resolver")
+    module = OrcaSlicerApi.from_values(
+        {"url": URL, "profile_dir": str(user_dir(tmp_path))}, transport=fake.transport()
+    )
+    module.poll_s = 0.01
+    module.slice(job(profiles=JOSH_PROFILES, settings=PrintSettings(walls=3)), Log())
+
+    printer = stub(fake.files(name="printerProfile")[0])
+    assert printer["inherits"] == "RatRig V-Core 3 300 0.4 nozzle"
+    assert printer["nozzle_diameter"] == ["0.5"] and printer["type"] == "machine"
+    assert printer["machine_start_gcode"].startswith("PRINT_WARMUP")
+    process = stub(fake.files(name="presetProfile")[0])
+    assert process["inherits"] == "0.20mm Standard @RatRig" and process["name"] == "0.2 Strong"
+    assert process["wall_loops"] == "3"  # the panel's setting wins over the profile's
+    # The system parent lists only RatRig printers: the user printer names itself.
+    assert process["compatible_printers"] == [JOSH]
+    assert "compatible_printers_condition" not in process
+    (filament,) = [stub(p) for p in fake.files(name="filamentProfile")]
+    assert filament["nozzle_temperature"] == ["260"] and filament["type"] == "filament"
+    assert filament["compatible_printers"] == [JOSH]
+
+
+def test_system_filament_with_a_user_printer_is_made_compatible(tmp_path: Path) -> None:
+    fake = FakeSidecar("resolver")
+    module = api(fake)
+    module.profile_dir = user_dir(tmp_path)
+    profiles = Profiles(JOSH, "0.2 Strong", "RatRig Generic ABS")
+    module.slice(job(profiles=profiles), Log())
+    (filament,) = [stub(p) for p in fake.files(name="filamentProfile")]
+    assert filament["inherits"] == filament["name"] == "RatRig Generic ABS"
+    assert filament["compatible_printers"] == [JOSH]
+
+
+def test_system_printer_unchanged_by_profile_dir(tmp_path: Path) -> None:
+    fake = FakeSidecar("resolver")
+    module = api(fake)
+    module.profile_dir = user_dir(tmp_path)
+    module.slice(job(), Log())
+    printer = stub(fake.files(name="printerProfile")[0])
+    assert printer == {"name": A1M, "inherits": A1M, "from": "system", "type": "machine"}
+    process = stub(fake.files(name="presetProfile")[0])
+    assert "compatible_printers" not in process
+
+
+def test_unreadable_user_profile_refused(tmp_path: Path) -> None:
+    (tmp_path / "process").mkdir()
+    (tmp_path / "process" / "bad.json").write_text("{nope")
+    fake = FakeSidecar("resolver")
+    module = api(fake)
+    module.profile_dir = tmp_path
+    with pytest.raises(ModuleError, match=r"Can.t read the profile bad\.json"):
+        module.slice(job(), Log())
+    assert "POST /slice" not in fake.paths  # nothing uploaded
+
+
+def test_user_profiles_listed_first(tmp_path: Path) -> None:
+    fake = FakeSidecar("resolver")
+    module = api(fake)
+    module.profile_dir = user_dir(tmp_path)
+    catalog = module.profiles("A1 mini")
+    assert catalog.printer == (JOSH, A1M)
+    assert catalog.process[0] == "0.2 Strong" and catalog.filament[0] == "PM ASA"
+
+
+def test_check_warns_about_a_missing_profile_dir(tmp_path: Path) -> None:
+    module = api(FakeSidecar("resolver"))
+    module.profile_dir = tmp_path / "nowhere"
+    health = module.check()
+    assert health.ok and "isn't a folder" in health.detail
 
 
 def build_items(threemf: bytes) -> tuple[list[tuple[float, float]], tuple[Any, Any]]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import errno
 import math
 import os
 import re
@@ -235,3 +236,23 @@ def test_write_atomic_failure_keeps_old_file_and_no_temp(
         write_atomic(target, "new\n")
     assert target.read_text() == "old\n"
     assert os.listdir(tmp_path) == ["config.toml"]
+
+
+def test_write_atomic_rewrites_a_bind_mounted_file_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Docker mounts docker/config.toml as a single file: renaming over it is EBUSY.
+    target = tmp_path / "config.toml"
+    target.write_text("old = 'a much longer value than the new one'\n")
+    target.chmod(0o664)
+    inode = target.stat().st_ino
+
+    def busy(*a: Any) -> None:
+        raise OSError(errno.EBUSY, "Device or resource busy")
+
+    monkeypatch.setattr(tomlwrite.os, "replace", busy)
+    write_atomic(target, "new = 1\n")
+    assert target.read_text() == "new = 1\n"  # truncated, nothing of the old text left
+    assert target.stat().st_ino == inode  # the same file the mount points at
+    assert stat.S_IMODE(target.stat().st_mode) == 0o664  # its own mode kept
+    assert os.listdir(tmp_path) == ["config.toml"]  # the temp file is gone

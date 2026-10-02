@@ -32,6 +32,7 @@ never half of one.
 from __future__ import annotations
 
 import contextlib
+import errno
 import math
 import os
 import re
@@ -174,6 +175,10 @@ def write_atomic(path: Path, text: str, mode: int = 0o600) -> None:
 
     The temp file lives in the same directory (so `os.replace` is a rename on one
     filesystem) and is removed if anything fails before the rename.
+
+    A file that is itself a mount point (Docker's single-file bind mount of config.toml)
+    can't be renamed over (EBUSY). It is then rewritten in place: not atomic, but the
+    only way to change it from inside the container. It keeps its own mode.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -184,7 +189,14 @@ def write_atomic(path: Path, text: str, mode: int = 0o600) -> None:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        try:
+            os.replace(tmp, path)
+        except OSError as e:
+            if e.errno != errno.EBUSY:
+                raise
+            _write_in_place(path, text)
+            os.unlink(tmp)
+            return
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
@@ -196,3 +208,11 @@ def write_atomic(path: Path, text: str, mode: int = 0o600) -> None:
             os.fsync(dfd)
         finally:
             os.close(dfd)
+
+
+def _write_in_place(path: Path, text: str) -> None:
+    with open(path, "r+", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+        f.truncate()
+        f.flush()
+        os.fsync(f.fileno())

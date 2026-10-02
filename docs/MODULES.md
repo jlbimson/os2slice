@@ -63,6 +63,7 @@ argv = ["flatpak", "run", "--file-forwarding", "com.orcaslicer.OrcaSlicer", "@@"
 [slicers.orca-api]               # OrcaSlicer as a server-side slicer (9b)
 kind = "orca-slicer-api"
 url = "http://172.30.32.1:3003"
+profile_dir = "/orca-profiles"   # optional: GUI user profiles (machine/, process/, filament/)
 
 [targets.farm]
 kind = "bambuddy"                # role "both": slices too, as slicer "farm"
@@ -104,6 +105,20 @@ slicer = "orca-api"              # any of: slicer, profiles (per field), bed_mm,
   send that key; the CLI and `default_printer` accept a key or a name.
 - Module field values are validated against the kind's `ModuleSpec.fields` (type,
   required, default); unknown keys and secrets in the file are refused.
+
+Sidecar profiles: by default a profile name is a system preset, sent as a stub that
+inherits it. With `profile_dir` (an OrcaSlicer config folder or one `user/<id>/` folder,
+`modules/orca_profiles.py`), a name found among the user's profiles (`<kind>/*.json`, and
+`_local/<bundle>/<kind>/*.json` from imported bundles) is uploaded whole instead,
+resolved against its system parents within their own vendor (`system/<Vendor>.json`),
+with legacy keys renamed first as the GUI does; the panel's settings still go on top.
+When the printer profile is a user one, the process and filaments carry
+`compatible_printers = [<printer>]`, because their system parents list only system
+printers and the slicer refuses the mismatch. `own_profiles()` lists them; the core
+(`Modules.own_profiles`) offers them in the panel: the filaments as materials (only for
+a printer whose target reports none and with no configured `materials`), the processes
+as a Process menu (`plan_print(process=...)`, which accepts only those and the configured
+one).
 
 Secrets: every `type = "secret"` field is looked up as `<section>.<name>.<key>` in the
 secret store (`auth.get_secret`): the keyring entry of that name, then

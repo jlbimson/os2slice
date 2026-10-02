@@ -36,6 +36,7 @@ import uuid
 import zipfile
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, ClassVar, Literal
 from urllib.parse import quote, urlsplit
 
@@ -57,6 +58,7 @@ from os2slice.modules.base import (
     SliceInput,
     SliceOutput,
 )
+from os2slice.modules.orca_profiles import OrcaProfiles
 from os2slice.orientation import bounding_box, translate_xy
 
 Flavour = Literal["afk", "resolver"]
@@ -77,6 +79,10 @@ GRAMS_RE = (  # one value per filament, comma-separated
     re.compile(rb"; filament used \[g\]\s*=\s*([\d.,]+)"),
 )
 SLICE_INFO = "Metadata/slice_info.config"
+COLOUR_RE = re.compile(r"#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?")
+# Filament colours for a multi-filament print whose filaments name none (distinct, so the
+# slicer's colour-based purge volumes aren't zero).
+STAND_IN_COLOURS = ("#1C71D8", "#E01B24", "#2EC27E", "#F5C211", "#9141AC", "#FF7800")
 
 
 def _fields(port: int) -> tuple[Field, ...]:
@@ -101,6 +107,14 @@ def _fields(port: int) -> tuple[Field, ...]:
             "secret",
             help="The sidecar has no auth of its own. Only for a reverse proxy in front "
             "of it that wants `Authorization: Bearer <key>`; leave empty otherwise.",
+        ),
+        Field(
+            "profile_dir",
+            "User profile folder",
+            "path",
+            help="Optional: a copy of the slicer's user preset folder (machine/, process/ "
+            "and filament/ JSON files, as the GUI saves them). A profile name found there "
+            "is uploaded whole; any other name goes up as a system preset.",
         ),
     )
 
@@ -151,6 +165,7 @@ class SlicerApi:
         url: str,
         timeout_s: float = 900,
         api_key: str = "",
+        profile_dir: str | Path = "",
         *,
         key: str = "",
         transport: httpx.BaseTransport | None = None,
@@ -166,6 +181,7 @@ class SlicerApi:
         self.url = url.strip().rstrip("/")
         self.timeout_s = float(timeout_s)
         self._headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        self.profile_dir = Path(profile_dir).expanduser() if profile_dir else None
         self._transport = transport
         self._client = self._new_client()
         self._flavour: Flavour | None = None
@@ -183,6 +199,7 @@ class SlicerApi:
             str(values["url"]),
             values.get("timeout_s") or 900,
             str(values.get("api_key") or ""),
+            str(values.get("profile_dir") or ""),
             key=key,
             transport=transport,
         )
@@ -271,6 +288,12 @@ class SlicerApi:
             # slicing works (docs/SLICERAPI_API.md). Pass, with a warning.
             ok = True
             detail = f"dataPath: {failing.pop('dataPath')[:200]} (harmless: profiles are uploaded)"
+        if self.profile_dir is not None and not self.profile_dir.is_dir():
+            missing = (
+                f"profile_dir {self.profile_dir} isn't a folder: "
+                "user profile names go up as system presets"
+            )
+            detail = f"{detail}; {missing}" if detail else missing
         summary = f"{self.spec.label} {'healthy' if ok else 'unhealthy'}"
         if version and version != "unknown":
             summary += f", slicer {version}"
@@ -289,11 +312,15 @@ class SlicerApi:
                 [(n, None) for n in self._names(cat)]
                 for cat in ("printers", "presets", "filaments")
             )
+        # Profiles in profile_dir come first, unfiltered: they're the ones set up for
+        # these printers, and their compatibility lives in the system preset they inherit.
+        found = self._user_profiles()
+        users = {kind: found.names(kind) for kind in ("machine", "process", "filament")}
         if not printer_model:
             return ProfileCatalog(
-                tuple(n for n, _ in printers),
-                tuple(n for n, _ in process),
-                tuple(n for n, _ in filament),
+                users["machine"] + tuple(n for n, _ in printers),
+                users["process"] + tuple(n for n, _ in process),
+                users["filament"] + tuple(n for n, _ in filament),
             )
         wanted = _norm(printer_model)
         chosen = {n for n, _ in printers if n == printer_model or wanted in _norm(n)}
@@ -304,10 +331,20 @@ class SlicerApi:
             return compat is None or bool(chosen.intersection(compat))
 
         return ProfileCatalog(
-            tuple(sorted(chosen)),
-            tuple(n for n, c in process if fits(c)),
-            tuple(n for n, c in filament if fits(c)),
+            users["machine"] + tuple(sorted(chosen)),
+            users["process"] + tuple(n for n, c in process if fits(c)),
+            users["filament"] + tuple(n for n, c in filament if fits(c)),
         )
+
+    def _user_profiles(self) -> OrcaProfiles:
+        """The profiles in `profile_dir` (orca_profiles.py). Read at every use, so a
+        profile saved in the GUI is used without a restart."""
+        return OrcaProfiles.load(self.profile_dir, f"[slicers.{self.key}] profile_dir")
+
+    def own_profiles(self) -> ProfileCatalog:
+        """Only the profiles in `profile_dir`: the choices the print panel offers."""
+        users = self._user_profiles()
+        return ProfileCatalog(*(users.names(kind) for kind in ("machine", "process", "filament")))
 
     def _names(self, category: str) -> list[str]:
         body = self._json(self._request("GET", f"/profiles/{category}"), f"{category} list")
@@ -334,15 +371,32 @@ class SlicerApi:
                 "Print multi-material parts through the bambu-studio-api (BamBuddy) sidecar",
             )
         model_type = "model/3mf" if model_name.endswith(".3mf") else "model/stl"
-        printer = _stub(job.profiles.printer, "machine")
+        users = self._user_profiles()
+        panel_filament = job.settings.filament_overrides(job.bed_type)
+        printer = _profile(users, job.profiles.printer, "machine")
+        # The slicer checks the process and filaments against the printer by name, and
+        # system presets list only system printers: a user printer names itself.
+        compat: dict[str, Any] = {}
+        if job.profiles.printer in users.users["machine"]:
+            compat = {"compatible_printers": [job.profiles.printer]}
         common: list[tuple[str, tuple[str, bytes, str]]] = [
             ("file", (model_name, model, model_type)),
             _json_part("printerProfile", "printer.json", printer),
         ]
         for n, f in enumerate(filaments, start=1):
-            colour = {"filament_colour": [f.colour]} if f.colour else {}
-            stub = _stub(f.profile, "filament", colour)
-            common.append(_json_part("filamentProfile", f"filament_{n}.json", stub))
+            colour = f.colour
+            if not colour and len(filaments) > 1:
+                # The OrcaSlicer CLI sizes its flush matrix by the filament colours and
+                # crashes (SIGSEGV) when a print has more filaments than colours: give
+                # each one, its profile's own or a stand-in (docs/SLICERAPI_API.md).
+                colour = (
+                    _profile_colour(users, f.profile)
+                    or STAND_IN_COLOURS[(n - 1) % len(STAND_IN_COLOURS)]
+                )
+            extra = {"filament_colour": [colour]} if colour else {}
+            extra.update((k, [v]) for k, v in panel_filament.items())  # per-filament lists
+            body = _profile(users, f.profile, "filament", {**extra, **compat})
+            common.append(_json_part("filamentProfile", f"filament_{n}.json", body))
         data = {"plate": "1"}
         if media == MEDIA_GCODE_3MF:
             data["exportType"] = "3mf"
@@ -364,8 +418,9 @@ class SlicerApi:
                 **job.settings.process_overrides(),
                 **job.process_overrides,
                 **tower,
+                **compat,
             }
-            process = _stub(job.profiles.process, "process", overrides)
+            process = _profile(users, job.profiles.process, "process", overrides)
             files = [*common, _json_part("presetProfile", "preset.json", process)]
             if flavour == "afk":
                 try:
@@ -621,13 +676,51 @@ def _stub(name: str, kind: str, extra: Mapping[str, Any] | None = None) -> bytes
     "standard" presets do); afk does the same with resolveProfileInheritance=true.
     Values are written the way presets store them: strings ("1" for true).
     """
-    body: dict[str, Any] = {}
+    body = _overridden({}, extra)
+    body.update({"name": name, "inherits": name, "from": "system", "type": kind})
+    return json.dumps(body).encode()
+
+
+def _profile(
+    users: OrcaProfiles,
+    name: str,
+    kind: str,
+    extra: Mapping[str, Any] | None = None,
+) -> bytes:
+    """The user profile `name` from `profile_dir`, resolved against its system parents,
+    with `extra` on top; else a stub of the system preset `name`."""
+    user = users.users[kind].get(name)
+    if user is None:
+        return _stub(name, kind, extra)
+    body = _overridden(users.flatten(user, kind), extra)
+    if body.get("from") == "Bundle":  # unresolved: the sidecar only takes "User" for that
+        body["from"] = "User"
+    if "compatible_printers" in (extra or {}):
+        body.pop("compatible_printers_condition", None)
+    body.update({"name": name, "type": kind})
+    return json.dumps(body).encode()
+
+
+def _profile_colour(users: OrcaProfiles, name: str) -> str | None:
+    """The colour a user filament profile gives itself, if any."""
+    user = users.users["filament"].get(name)
+    if user is None:
+        return None
+    flat = users.flatten(user, "filament")
+    for key in ("filament_colour", "default_filament_colour"):
+        value = flat.get(key)
+        first = value[0] if isinstance(value, list) and value else value
+        if isinstance(first, str) and COLOUR_RE.fullmatch(first):
+            return first
+    return None
+
+
+def _overridden(body: dict[str, Any], extra: Mapping[str, Any] | None) -> dict[str, Any]:
     for key, value in (extra or {}).items():
         if not OVERRIDE_KEY_RE.fullmatch(key):
             raise ModuleError(f"Unusable slicer setting name {key[:40]!r}")
         body[key] = [_setting(v) for v in value] if isinstance(value, list) else _setting(value)
-    body.update({"name": name, "inherits": name, "from": "system", "type": kind})
-    return json.dumps(body).encode()
+    return body
 
 
 def _json_part(field: str, filename: str, body: bytes) -> tuple[str, tuple[str, bytes, str]]:

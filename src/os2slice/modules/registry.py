@@ -21,8 +21,10 @@ from os2slice.modules.bambuddy import BambuddyModule
 from os2slice.modules.base import (
     Field,
     Material,
+    ModuleError,
     ModuleSpec,
     PrinterInfo,
+    ProfileCatalog,
     Slicer,
     Target,
 )
@@ -262,6 +264,18 @@ class Modules:
                 f"Set slicer for {printer.model or printer.name} in the config",
             )
         return self.slicers[printer.slicer]  # type: ignore[no-any-return]
+
+    def own_profiles(self, printer: PrinterInfo) -> ProfileCatalog:
+        """The user's own profiles in the printer's slicer (a sidecar's `profile_dir`), for
+        the panel's menus. Empty for a slicer without them, or when they can't be read."""
+        own = getattr(self.slicers.get(printer.slicer), "own_profiles", None)
+        if own is None:
+            return ProfileCatalog()
+        try:
+            return own()  # type: ignore[no-any-return]
+        except ModuleError as e:
+            log.warning("%s: own profiles unreadable: %s", printer.slicer, e.one_line())
+            return ProfileCatalog()
 
     def starts(self, printer: PrinterInfo) -> bool:
         """Whether a submitted print may start by itself (manual_start = false)."""

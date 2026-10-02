@@ -293,3 +293,13 @@ def test_pairing_checks_media_technology_and_exclusive_modules(
         }
         with pytest.raises(ConfigError, match=message):
             _parse(data)
+
+
+def test_web_orca_table(tmp_path: Path) -> None:
+    cfg = config.parse({"web_orca": {"url": "https://print.lan:3444/"}}, tmp_path / "c")
+    assert cfg.web_orca is not None and cfg.web_orca.url == "https://print.lan:3444"
+    assert cfg.web_orca.inbox == Path("/share/os2slice/orca-inbox")
+    assert cfg.web_orca.status == Path("/share/os2slice/web-orca.json")
+    assert cfg.web_studio is None
+    with pytest.raises(ConfigError, match=r"web_orca\.url must look like https://host:3444"):
+        config.parse({"web_orca": {"url": "http://print.lan:3444"}}, tmp_path / "c")

@@ -7,7 +7,8 @@ Print Onshape parts from inside Onshape. os2slice sits between Onshape and your 
 - Slicing in BamBuddy, or in a **Bambu Studio** or **OrcaSlicer** API sidecar.
 - A web config page, `/admin`, for printers, slicers, secrets and settings.
 - A live 3D preview of the part as it will sit on the plate.
-- **Open in Bambu Studio**: in a shared Bambu Studio served in the browser, or in your own, with the printer and filament profiles already set.
+- **Open in Bambu Studio** or **OrcaSlicer**: in a shared slicer served in the browser (or Bambu Studio on your own computer), with the printer and filament profiles already set.
+- Your own OrcaSlicer process and filament profiles in the panel, and extra settings (chamber temperature, layer height, …) chosen on `/admin`.
 - Each user signs in with their own Onshape account (read-only), so no documents need sharing.
 
 It runs on a machine on the printers' LAN, either with **Docker Compose** or as a **Home Assistant** add-on, and serves that LAN only.
@@ -116,7 +117,7 @@ The install options above set up one BamBuddy that slices and queues. Everything
 The page is off until an admin password is set on the server, never from a browser:
 
 - Home Assistant: the `admin_password` option, then restart the add-on.
-- Docker: `docker compose exec os2slice os2slice admin-password`. With the shipped compose file `config.toml` is read-only, so the page can't save config there; see [`docs/DOCKER.md`](docs/DOCKER.md).
+- Docker: `docker compose exec os2slice os2slice admin-password`.
 - A desktop install: `os2slice admin-password`.
 
 The same settings live in `config.toml`; [`os2slice.example.toml`](os2slice.example.toml) has commented examples of every table, and `os2slice setup-keys --secret <section>.<key>.<field>` stores a module secret from a terminal.

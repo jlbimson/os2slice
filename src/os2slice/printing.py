@@ -8,6 +8,7 @@ target modules (docs/MODULES.md, D-27); this file knows no service by name.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -26,6 +27,7 @@ from os2slice.modules.base import (
     PartGeometry,
     PrinterInfo,
     PrinterStatus,
+    ProfileCatalog,
     Profiles,
     SliceInput,
     SliceOutput,
@@ -180,9 +182,20 @@ def has_profiles(printer: PrinterInfo) -> bool:
     return bool(printer.slicer and (p.printer or p.process or p.filament))
 
 
-def materials_of(printer: PrinterInfo, status: PrinterStatus) -> tuple[Material, ...]:
-    """What the printer has loaded, or its configured materials when the target can't tell."""
-    return status.materials or printer.materials
+def materials_of(
+    printer: PrinterInfo, status: PrinterStatus, own: ProfileCatalog | None = None
+) -> tuple[Material, ...]:
+    """What the printer has loaded; when the target can't tell, its configured materials,
+    else the user's own filament profiles in its slicer (`own`), one choice each."""
+    if status.materials or printer.materials:
+        return status.materials or printer.materials
+    return tuple(profile_material(name) for name in (own.filament if own else ()))
+
+
+def profile_material(profile: str) -> Material:
+    """A filament profile offered as a material. Its id is stable while the name is."""
+    digest = hashlib.sha256(profile.encode()).hexdigest()[:12]
+    return Material(id=f"f-{digest}", label=profile, profile=profile)
 
 
 def usable(material: Material, printer: PrinterInfo) -> bool:
@@ -209,6 +222,7 @@ def plan_print(
     material: str | None = None,
     bed_type: str | None = None,
     extra_parts: list[tuple[str, str]] | None = None,
+    process: str | None = None,
 ) -> PrintPlan:
     """Gather everything for the confirmation. Reads from Onshape and the target only.
 
@@ -216,7 +230,8 @@ def plan_print(
     is a Material.id from the printer's status (a global tray id on BamBuddy); the
     filament profile then follows the loaded material instead of the configured one.
     `extra_parts` makes it a multi-material print: more (part id, material id) pairs
-    printed as one object.
+    printed as one object. `process` picks one of the user's own process profiles in the
+    printer's slicer instead of the configured one.
     """
     if not modules.targets:
         raise ConfigError(
@@ -232,7 +247,8 @@ def plan_print(
         )
     target = modules.target_for(chosen)
     status = target.status(chosen)
-    loaded = {m.id: m for m in materials_of(chosen, status)}
+    own = modules.own_profiles(chosen)
+    loaded = {m.id: m for m in materials_of(chosen, status, own)}
     dual = chosen.nozzle_count > 1
 
     def resolve(mid: str) -> Material:
@@ -249,6 +265,10 @@ def plan_print(
         return m
 
     profiles = chosen.profiles
+    if process and process != profiles.process:
+        if process not in own.process:
+            raise BadRequest(f"No process profile {process[:80]!r} for {chosen.name}")
+        profiles = replace(profiles, process=process)
     first: Material | None = None
     if material is not None:
         first = resolve(material)

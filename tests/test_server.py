@@ -720,6 +720,41 @@ def test_web_studio_refusals(srv: Running, web: Running) -> None:
     )
 
 
+@pytest.fixture
+def web_orca(cfg: Config, tmp_path) -> Iterator[Running]:
+    from os2slice.config import WebStudioConfig
+
+    ws = WebStudioConfig("https://orca.test:3444", tmp_path / "orca-inbox", tmp_path / "orca.json")
+    run = Running(dataclasses.replace(cfg, web_orca=ws), FakeBambuddy(job_states=["completed"]))
+    yield run
+    run.httpd.shutdown()
+
+
+def test_web_orca_handoff_beside_the_desktop_bambu_link(web_orca: Running) -> None:
+    import json
+    import time
+
+    ws = web_orca.svc.cfg.web_orca
+    r, form = panel_form(web_orca)
+    assert 'id="web-orca-link"' in r.text and 'href="https://orca.test:3444"' in r.text
+    assert 'data-label="OrcaSlicer"' in r.text and 'id="web-studio-link"' not in r.text
+    assert 'Open in Bambu Studio: <a id="studio-link"' in r.text  # still offered
+    h = {"Host": HOST, "Sec-Fetch-Site": "same-origin", "Origin": f"http://{HOST}"}
+    got = web_orca.http.post("/panel/web-orca", data={**form, "p": "JHD"}, headers=h)
+    assert got.status_code == 200, got.text
+    assert got.json()["url"] == "https://orca.test:3444"
+    assert len(list(ws.inbox.glob("Part 1-*.3mf"))) == 1
+    fetch = {"Host": HOST, "Sec-Fetch-Site": "same-origin"}
+    ws.status.write_text(json.dumps({"viewers": 1, "updated": time.time()}))
+    status = web_orca.http.get("/panel/web-orca/status", headers=fetch).json()
+    assert status == {"state": "busy", "viewers": 1}
+    # The web Bambu Studio isn't set up here: its endpoint says so.
+    assert (
+        web_orca.http.post("/panel/web-studio", data={**form, "p": "JHD"}, headers=h).status_code
+        == 500
+    )
+
+
 def test_client_going_away_is_not_a_crash(
     srv: Running, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -734,3 +769,67 @@ def test_client_going_away_is_not_a_crash(
     with caplog.at_level("INFO", logger="os2slice.server"), contextlib.suppress(httpx.HTTPError):
         srv.http.get("/static/panel.js", headers={"Host": HOST})
     assert "client went away (SSLError)" in caplog.text and "crashed" not in caplog.text
+
+
+# -- the panel's process menu (own profiles in the printer's slicer) ---------------------
+
+
+def own_view(processes: tuple[str, ...]) -> server.PrinterView:
+    from os2slice.modules.base import PrinterInfo, Profiles
+    from os2slice.printing import profile_material
+
+    printer = PrinterInfo(
+        "joshprint", "JoshPrint", "fdm", "RatRig V-Core 3 300", "joshprint", "orca",
+        Profiles("JoshPrint 0.5 MMU", "0.2 Strong", "PM ASA"),
+    )  # fmt: skip
+    materials = (profile_material("BL ASA-CF"), profile_material("PM ASA"))
+    return server.PrinterView(printer, "ready", True, materials, processes)
+
+
+def test_panel_process_menu_lists_own_profiles_with_the_preset_first() -> None:
+    html = server._panel_printer_selects([own_view(("0.2 Solid", "0.2 Strong"))], "joshprint")
+    menu = re.search(
+        r'<label>Process <select name="process" data-choices="[^"]*">(.*?)</select>', html
+    )
+    assert menu, html
+    assert menu.group(1) == (
+        '<option value="" selected>0.2 Strong</option><option value="0.2 Solid">0.2 Solid</option>'
+    )
+    # The filament menu preselects the profile the printer is configured with.
+    filament = re.search(r'<select name="filament"[^>]*>(.*?)</select>', html).group(1)
+    assert re.search(r'<option value="f-[0-9a-f]{12}" selected>PM ASA</option>', filament)
+
+
+def test_panel_process_menu_hidden_without_own_profiles() -> None:
+    html = server._panel_printer_selects([own_view(())], "joshprint")
+    assert '<label hidden>Process <select name="process"' in html
+
+
+def test_selection_carries_the_process_choice() -> None:
+    form = {"d": DOC, "wv": "w", "wvid": WS, "e": ELEM, "p": "JHD", "printer": "joshprint"}
+    assert server._selection({**form, "process": "0.2 Solid"}, panel=True)[6] == "0.2 Solid"
+    assert server._selection(form, panel=True)[6] == ""
+    assert server._selection({**form, "process": "0.2 Solid"}, panel=False)[6] == ""
+    for bad in ("x" * 201, "0.2\nSolid"):
+        with pytest.raises(server.BadRequest, match="Invalid process choice"):
+            server._selection({**form, "process": bad}, panel=True)
+
+
+def test_panel_extra_settings_reach_the_slicer(cfg: Config) -> None:
+    run = Running(dataclasses.replace(cfg, panel_extras=("layer_height", "seam_position")),
+                  FakeBambuddy(job_states=["completed"]))  # fmt: skip
+    try:
+        r, form = panel_form(run)
+        assert '<details class="extras" open><summary>More settings</summary>' in r.text
+        assert '<select name="x_seam_position"><option value="" selected>From the profile' in r.text
+        bad = post_panel(run, {**form, "p": "JHD", "x_layer_height": "5"})
+        assert bad.status_code == 400 and run.fake.uploads == []
+        _, form = panel_form(run)
+        ok = post_panel(run, {**form, "p": "JHD", "x_layer_height": "0.12", "x_seam_position": ""})
+        assert ok.status_code == 303
+        page = wait_job(run, ok.headers["Location"], headers=FRAME)
+        assert "layer height 0.12 mm" in page.text
+        overrides = run.fake.slice_bodies[0]["process_overrides"]
+        assert overrides["layer_height"] == "0.12" and "seam_position" not in overrides
+    finally:
+        run.httpd.shutdown()

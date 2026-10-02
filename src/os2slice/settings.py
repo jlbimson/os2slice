@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
+from os2slice import extra_settings
 from os2slice.errors import BadRequest
 
 Supports = Literal["off", "normal", "tree"]
@@ -68,6 +69,8 @@ class PrintSettings:
     bottom_layers: int = 3
     brim: bool = False  # True: outer brim; False: none (overrides the preset's auto brim)
     copies: int = 1  # of the whole selection on one plate; laid out by os2slice, not a slicer key
+    # Extra slicer settings from the panel, (catalog key, value) (extra_settings.py).
+    extras: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         _check_int("walls", self.walls, WALLS_RANGE)
@@ -80,6 +83,10 @@ class PrintSettings:
         for name in ("build_plate_only", "brim"):
             if not isinstance(getattr(self, name), bool):
                 raise BadRequest(f"{name} must be true or false")
+        for key, value in self.extras:
+            if key not in extra_settings.BY_KEY:
+                raise BadRequest(f"Unknown extra setting {key[:40]!r}")
+            extra_settings.BY_KEY[key].parse(value)
 
     def process_overrides(self) -> dict[str, Any]:
         """Bambu Studio process keys, in the shapes verified in docs/BAMBUDDY_API.md."""
@@ -94,7 +101,12 @@ class PrintSettings:
         if self.supports != "off":
             overrides["support_type"] = SUPPORT_TYPE[self.supports]
             overrides["support_on_build_plate_only"] = 1 if self.build_plate_only else 0
+        overrides.update(extra_settings.overrides(self.extras, "process"))
         return overrides
+
+    def filament_overrides(self, bed_type: str | None = None) -> dict[str, str]:
+        """The panel's extra filament settings (one value, for every filament)."""
+        return extra_settings.overrides(self.extras, "filament", bed_type)
 
     def describe(self) -> str:
         sup = "no supports" if self.supports == "off" else f"{self.supports} supports"
@@ -105,6 +117,8 @@ class PrintSettings:
         text += ", brim" if self.brim else ", no brim"
         if self.copies > 1:
             text += f", {self.copies} copies"
+        if self.extras:
+            text += f"; {extra_settings.describe(self.extras)}"
         return text
 
     @classmethod

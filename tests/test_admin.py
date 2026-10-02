@@ -698,3 +698,29 @@ def test_reload_closes_the_replaced_modules_unless_a_job_runs(adm: Admin) -> Non
     adm.svc.reload()
     release.set()
     assert closed == ["a"]  # a job may still use them; left for the collector
+
+
+def test_extra_panel_settings_are_chosen_on_the_defaults_page(logged: Admin) -> None:
+    page = logged.get("/admin/defaults").text
+    assert "More settings in the Onshape panel" in page
+    assert 'name="extra_chamber_temperature"' in page
+    form = {"walls": "3", "infill": "20", "supports": "off", "top_layers": "5",
+            "bottom_layers": "3", "copies": "1", "bed_type": "",
+            "extra_chamber_temperature": "on", "extra_layer_height": "on"}  # fmt: skip
+    r = logged.submit("/admin/defaults", "/admin/defaults", form)
+    assert r.status_code == 303, r.text
+    saved = tomllib.loads(logged.path.read_text())
+    assert saved["panel"] == {"extra_settings": ["chamber_temperature", "layer_height"]}
+    assert saved["print_defaults"]["infill"] == 20
+    # The running service has them at once: the panel shows the fields, empty.
+    assert logged.svc.cfg.panel_extras == ("chamber_temperature", "layer_height")
+    fields = server._extra_fields(logged.svc.cfg)
+    assert 'name="x_chamber_temperature" min="0" max="100" step="1"' in fields
+    assert 'placeholder="From the profile"' in fields
+    assert re.search(r'checked[^>]*>\s*Chamber temperature|extra_chamber_temperature"[^>]*checked',
+                     logged.get("/admin/defaults").text)  # fmt: skip
+    # Unticking them all removes the table.
+    form = {k: v for k, v in form.items() if not k.startswith("extra_")}
+    assert logged.submit("/admin/defaults", "/admin/defaults", form).status_code == 303
+    assert "panel" not in tomllib.loads(logged.path.read_text())
+    assert server._extra_fields(logged.svc.cfg) == ""

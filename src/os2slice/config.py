@@ -11,6 +11,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, cast
 
+from os2slice import extra_settings
 from os2slice.bambuddy import PresetChoice
 from os2slice.errors import BadRequest, ConfigError
 from os2slice.modules.base import ModelDefaults, ModuleSpec, Profiles
@@ -34,7 +35,7 @@ FIX = "Edit {path}"
 PRINTER_KEY_RE = re.compile(r"[A-Za-z0-9_.()+-][A-Za-z0-9 _.()+-]{0,63}")
 TOP_LEVEL = {
     "onshape", "server", "export", "slicers", "targets", "printers", "default_printer",
-    "bambuddy", "print_defaults", "web_studio",
+    "bambuddy", "print_defaults", "web_studio", "web_orca", "panel",
 }  # fmt: skip
 
 
@@ -94,6 +95,8 @@ class Config:
     default_bed_type: str | None = None  # [print_defaults] bed_type
     server: ServerConfig = field(default_factory=lambda: ServerConfig())
     web_studio: WebStudioConfig | None = None
+    web_orca: WebStudioConfig | None = None  # the same for the web OrcaSlicer (orca-web)
+    panel_extras: tuple[str, ...] = ()  # [panel] extra_settings: extra_settings.CATALOG keys
     # [onshape] auth: "keys" = one shared API key pair; "oauth" = each user signs in (D-23)
     onshape_auth: str = "keys"
     oauth_client_id: str = ""
@@ -107,7 +110,8 @@ class Config:
 
 @dataclass(frozen=True)
 class WebStudioConfig:
-    """The shared Bambu Studio browser session (bambustudio_web add-on, D-21)."""
+    """A shared slicer session in the browser: Bambu Studio (bambustudio_web add-on, D-21)
+    or OrcaSlicer (orcaslicer_web)."""
 
     url: str  # what browsers open, e.g. https://print.example.duckdns.org:3001
     inbox: Path  # where os2slice drops 3MF files for it to open
@@ -332,18 +336,36 @@ def parse(data: dict[str, Any], path: Path) -> Config:
     except BadRequest as e:
         raise fail(f"[print_defaults]: {e.message}") from e
 
-    web_studio = None
-    ws = table("web_studio")
-    if ws:
-        check_keys("web_studio", ws, {"url", "inbox", "status"})
+    def web_app(name: str, port: int, inbox: str, status: str) -> WebStudioConfig | None:
+        ws = table(name)
+        if not ws:
+            return None
+        check_keys(name, ws, {"url", "inbox", "status"})
         url = str(ws.get("url", "")).rstrip("/")
         if not re.fullmatch(r"https://[A-Za-z0-9.-]+(:[0-9]{1,5})?", url):
-            raise fail("web_studio.url must look like https://host:3001")
-        inbox = Path(str(ws.get("inbox", "/share/os2slice/inbox"))).expanduser()
-        status = Path(str(ws.get("status", "/share/os2slice/web-studio.json"))).expanduser()
-        if not (inbox.is_absolute() and status.is_absolute()):
-            raise fail("web_studio.inbox and .status must be absolute paths")
-        web_studio = WebStudioConfig(url, inbox, status)
+            raise fail(f"{name}.url must look like https://host:{port}")
+        inbox_path = Path(str(ws.get("inbox", inbox))).expanduser()
+        status_path = Path(str(ws.get("status", status))).expanduser()
+        if not (inbox_path.is_absolute() and status_path.is_absolute()):
+            raise fail(f"{name}.inbox and .status must be absolute paths")
+        return WebStudioConfig(url, inbox_path, status_path)
+
+    panel = table("panel")
+    check_keys("panel", panel, {"extra_settings"})
+    wanted = panel.get("extra_settings", [])
+    if not (isinstance(wanted, list) and all(isinstance(k, str) for k in wanted)):
+        raise fail("panel.extra_settings must be a list of setting names")
+    try:
+        panel_extras = extra_settings.check_keys(wanted)
+    except BadRequest as e:
+        raise fail(f"panel.extra_settings: {e.message}. {e.fix}") from e
+
+    web_studio = web_app(
+        "web_studio", 3001, "/share/os2slice/inbox", "/share/os2slice/web-studio.json"
+    )
+    web_orca = web_app(
+        "web_orca", 3444, "/share/os2slice/orca-inbox", "/share/os2slice/web-orca.json"
+    )
 
     return Config(
         path=path,
@@ -362,6 +384,8 @@ def parse(data: dict[str, Any], path: Path) -> Config:
         default_bed_type=default_bed_type,
         server=server_cfg,
         web_studio=web_studio,
+        web_orca=web_orca,
+        panel_extras=panel_extras,
         onshape_auth=onshape_auth,
         oauth_client_id=oauth_client_id,
         oauth_base_url=oauth_base_url,

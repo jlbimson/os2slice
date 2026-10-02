@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from urllib.parse import SplitResult, parse_qsl, urlencode, urlsplit
 
-from os2slice import __version__, auth, config, tomlwrite
+from os2slice import __version__, auth, config, extra_settings, tomlwrite
 from os2slice.adminauth import SESSION_TTL, PasswordError
 from os2slice.errors import BadRequest, ConfigError, Os2sliceError
 from os2slice.logsetup import log_path
@@ -1604,9 +1604,13 @@ def _post_server(ctx: Ctx, form: dict[str, str]) -> None:
     ctx.redirect("/admin/server?saved=1")
 
 
+PRINT_SETTING_NAMES = {
+    "walls", "infill", "supports", "build_plate_only", "top_layers", "bottom_layers", "brim",
+    "copies",
+}  # fmt: skip
 DEFAULT_NAMES = {
     "walls", "infill", "supports", "build_plate_only", "top_layers", "bottom_layers", "brim",
-    "copies", "bed_type",
+    "copies", "bed_type", *(f"extra_{key}" for key in extra_settings.BY_KEY),
 }  # fmt: skip
 
 
@@ -1622,6 +1626,7 @@ def _defaults_vals(cfg: config.Config) -> dict[str, str]:
         "brim": "on" if p.brim else "",
         "copies": str(p.copies),
         "bed_type": cfg.default_bed_type or "",
+        **{f"extra_{key}": "on" for key in cfg.panel_extras},
     }
 
 
@@ -1644,6 +1649,16 @@ def _get_defaults(ctx: Ctx, params: dict[str, str], vals: Mapping[str, str] | No
         + num("copies", "Copies", COPIES_RANGE)
         + _select("bed_type", "Build plate", _plate_choices(), v.get("bed_type", ""),
                   "a printer's or model's own plate wins")
+        + "<h2>More settings in the Onshape panel</h2>"
+        + "<p class=muted>Each one ticked here appears in the panel, empty: the profile's own "
+          "value applies until someone fills it in. Filament settings go into every filament "
+          "of the print; BamBuddy printers can't take them.</p>"
+        + "".join(
+            _check(f"extra_{s.key}", f"{s.label}{f' ({s.unit})' if s.unit else ''}",
+                   bool(v.get(f"extra_{s.key}")),
+                   f"{s.scope} setting {s.key}" + (f"; {s.help}" if s.help else ""))
+            for s in extra_settings.CATALOG
+        )
     )  # fmt: skip
     body = (
         _saved(params) + _msg(error, "bad")
@@ -1657,7 +1672,7 @@ def _post_defaults(ctx: Ctx, form: dict[str, str]) -> None:
     _expect(form, DEFAULT_NAMES)
     vals = {k: form.get(k, "") for k in DEFAULT_NAMES}
     try:
-        strings = {k: v for k, v in vals.items() if k != "bed_type"}
+        strings = {k: v for k, v in vals.items() if k in PRINT_SETTING_NAMES}
         try:
             s = PrintSettings.from_strings(strings, PrintSettings())
         except BadRequest as e:
@@ -1677,6 +1692,16 @@ def _post_defaults(ctx: Ctx, form: dict[str, str]) -> None:
             if vals["bed_type"]:
                 tbl["bed_type"] = vals["bed_type"]
             data["print_defaults"] = tbl
+            chosen = [s.key for s in extra_settings.CATALOG if vals.get(f"extra_{s.key}")]
+            panel = dict(data.get("panel") or {})
+            if chosen:
+                panel["extra_settings"] = chosen
+            else:
+                panel.pop("extra_settings", None)
+            if panel:
+                data["panel"] = panel
+            else:
+                data.pop("panel", None)
 
         _save(ctx.svc, mutate, "print_defaults")
     except Invalid as e:

@@ -8,6 +8,7 @@ module is called directly: what's asserted is what the core makes them do.
 from __future__ import annotations
 
 import io
+import json
 import re
 import zipfile
 from pathlib import Path
@@ -18,8 +19,8 @@ import pytest
 
 from os2slice import config, printing
 from os2slice.auth import Keys
-from os2slice.errors import ConfigError
-from os2slice.modules.base import ModuleAuthError
+from os2slice.errors import BadRequest, ConfigError
+from os2slice.modules.base import ModuleAuthError, ModuleError
 from os2slice.modules.registry import Modules
 from os2slice.modules.slicerapi import SlicerApi
 from os2slice.onshape import OnshapeClient
@@ -412,3 +413,188 @@ def test_doctor_renders_a_row_per_new_module(
     assert "dataPath" in row("WARN", "slicer studio")
     assert not any(re.match(r"WARN  (target voron|target mk4|slicer orca-api)\s", r) for r in rows)
     assert "wrong-key" not in "\n".join(rows)
+
+
+# -- (f) a sidecar with the user's own GUI profiles (profile_dir) -----------------------
+
+
+def own_profiles_config(tmp_path: Path) -> config.Config:
+    """A Klipper printer whose slicer reads an OrcaSlicer config folder, no materials."""
+    root = tmp_path / "OrcaSlicer"
+    user = root / "user" / "0d1e5a7c"
+    for kind, name, body in (
+        ("machine", "JoshPrint 0.5 MMU", {"nozzle_diameter": ["0.5"]}),
+        ("process", "0.2 Strong", {"wall_loops": "4"}),
+        ("process", "0.2 Solid", {"wall_loops": "6"}),
+        (
+            "filament",
+            "PM ASA",
+            {"nozzle_temperature": ["260"], "default_filament_colour": ["#241F31"]},
+        ),
+        ("filament", "Sirayatech PET-CF", {"nozzle_temperature": ["300"]}),
+    ):
+        (user / kind).mkdir(parents=True, exist_ok=True)
+        (user / kind / f"{name}.json").write_text(json.dumps({"name": name, **body}))
+    return parse(
+        tmp_path,
+        default_printer="joshprint",
+        slicers={
+            "orca": {
+                "kind": "orca-slicer-api",
+                "url": "http://orca.test:3003",
+                "profile_dir": str(root),
+            }
+        },
+        targets={"joshprint": {"kind": "moonraker", "url": MOONRAKER_URL}},
+        printers={
+            "joshprint": {
+                "target": "joshprint",
+                "slicer": "orca",
+                "model": "RatRig V-Core 3 300",
+                "bed_mm": [300, 300],
+                "profiles": {
+                    "printer": "JoshPrint 0.5 MMU",
+                    "process": "0.2 Strong",
+                    "filament": "PM ASA",
+                },
+            }
+        },
+    )
+
+
+def plan_own(
+    cfg: config.Config, onshape: OnshapeClient, modules: Modules, **kw: Any
+) -> printing.PrintPlan:
+    req = parse_onshape_url(URL, "e2e", ["e2e"], "JHD")
+    return printing.plan_print(
+        req, cfg, onshape, modules, "joshprint", Orientation.parse("as-modeled"),
+        PrintSettings(3, 25), **kw,
+    )  # fmt: skip
+
+
+def test_own_filaments_are_the_choices_and_a_process_can_be_picked(
+    tmp_path: Path, onshape: OnshapeClient
+) -> None:
+    cfg = own_profiles_config(tmp_path)
+    klipper, orca = FakeMoonraker(), FakeSidecar("resolver")
+    with Modules.from_config(
+        cfg,
+        secrets=secrets({}),
+        transports={"joshprint": httpx.MockTransport(klipper), "orca": orca.transport()},
+    ) as modules:
+        chosen = modules.find("joshprint")
+        own = modules.own_profiles(chosen)
+        assert own.process == ("0.2 Solid", "0.2 Strong")
+        menu = printing.materials_of(chosen, modules.target_for(chosen).status(chosen), own)
+        assert [m.label for m in menu] == ["PM ASA", "Sirayatech PET-CF"]
+        petcf = menu[1]
+        assert re.fullmatch(r"f-[0-9a-f]{12}", petcf.id) and petcf.profile == "Sirayatech PET-CF"
+
+        plan = plan_own(cfg, onshape, modules, material=petcf.id, process="0.2 Solid")
+        assert plan.profiles.process == "0.2 Solid"
+        assert plan.profiles.filament == "Sirayatech PET-CF"
+        printing.execute_print(plan, cfg, onshape, modules, queue=True)
+
+        # Several parts: each its own filament profile, as two filaments in one print.
+        plan = plan_own(cfg, onshape, modules, material=menu[0].id, extra_parts=[("JKD", petcf.id)])
+        printing.execute_print(plan, cfg, onshape, modules, queue=True)
+
+    first, second = orca.uploads[0], orca.uploads[-1]
+    process = next(p for p in first if p.name == "presetProfile").json()
+    assert process["name"] == "0.2 Solid" and process["wall_loops"] == "3"  # the panel's walls
+    (filament,) = [p.json() for p in first if p.name == "filamentProfile"]
+    assert filament["nozzle_temperature"] == ["300"]
+    assert filament["compatible_printers"] == ["JoshPrint 0.5 MMU"]
+    filaments = [p.json() for p in second if p.name == "filamentProfile"]
+    assert [f["name"] for f in filaments] == ["PM ASA", "Sirayatech PET-CF"]
+    # Every filament has a colour, or the OrcaSlicer CLI crashes: its profile's, or a stand-in.
+    assert [f["filament_colour"] for f in filaments] == [["#241F31"], ["#E01B24"]]
+    assert "filament_colour" not in filament  # one filament: left to the profile
+    assert len(klipper.uploads) == 2
+
+
+def test_a_process_that_isnt_ours_is_refused(tmp_path: Path, onshape: OnshapeClient) -> None:
+    cfg = own_profiles_config(tmp_path)
+    with Modules.from_config(
+        cfg,
+        secrets=secrets({}),
+        transports={
+            "joshprint": httpx.MockTransport(FakeMoonraker()),
+            "orca": FakeSidecar("resolver").transport(),
+        },
+    ) as modules:
+        with pytest.raises(BadRequest, match=r"No process profile '0\.20mm Standard @RatRig'"):
+            plan_own(cfg, onshape, modules, process="0.20mm Standard @RatRig")
+        # The configured one is always allowed, own or not.
+        assert (
+            plan_own(cfg, onshape, modules, process="0.2 Strong").profiles.process == "0.2 Strong"
+        )
+
+
+# -- (g) the panel's extra settings ([panel] extra_settings) -----------------------------
+
+
+def test_extra_settings_reach_the_sidecars_process_and_every_filament(
+    tmp_path: Path, onshape: OnshapeClient
+) -> None:
+    cfg = own_profiles_config(tmp_path)
+    klipper, orca = FakeMoonraker(), FakeSidecar("resolver")
+    extras = (("chamber_temperature", "55"), ("bed_temperature", "100"), ("layer_height", "0.28"))
+    with Modules.from_config(
+        cfg,
+        secrets=secrets({}),
+        transports={"joshprint": httpx.MockTransport(klipper), "orca": orca.transport()},
+    ) as modules:
+        chosen = modules.find("joshprint")
+        menu = printing.materials_of(
+            chosen, modules.target_for(chosen).status(chosen), modules.own_profiles(chosen)
+        )
+        req = parse_onshape_url(URL, "e2e", ["e2e"], "JHD")
+        plan = printing.plan_print(
+            req, cfg, onshape, modules, "joshprint", Orientation.parse("as-modeled"),
+            PrintSettings(3, 25, extras=extras), menu[0].id, "High Temp Plate",
+            [("JKD", menu[1].id)],
+        )  # fmt: skip
+        printing.execute_print(plan, cfg, onshape, modules, queue=True)
+    upload = orca.uploads[-1]
+    process = next(p for p in upload if p.name == "presetProfile").json()
+    assert process["layer_height"] == "0.28" and "chamber_temperature" not in process
+    filaments = [p.json() for p in upload if p.name == "filamentProfile"]
+    assert len(filaments) == 2
+    for f in filaments:
+        assert f["chamber_temperature"] == ["55"]
+        assert f["hot_plate_temp"] == ["100"] and f["hot_plate_temp_initial_layer"] == ["100"]
+    assert "chamber temperature 55 °C" in plan.settings.describe()
+
+
+def test_bambuddy_refuses_filament_extras_but_takes_process_ones(
+    tmp_path: Path, onshape: OnshapeClient
+) -> None:
+    cfg = parse(
+        tmp_path,
+        default_printer="A1 Mini",
+        targets={
+            "farm": {
+                "kind": "bambuddy",
+                "url": "http://bambuddy.test:8000",
+                "models": {"A1 Mini": {"profiles": A1_PROFILES}},
+            }
+        },
+    )
+    bb = FakeBambuddy(job_states=["completed"])
+    with Modules.from_config(
+        cfg,
+        secrets=secrets({"targets.farm.api_key": "bb-key"}),
+        transports={"farm": httpx.MockTransport(bb)},
+    ) as modules:
+        with pytest.raises(ModuleError, match="BamBuddy slices with its filament presets"):
+            run(
+                cfg,
+                onshape,
+                modules,
+                "A1 Mini",
+                PrintSettings(extras=(("chamber_temperature", "50"),)),
+            )
+        assert bb.uploads == []  # refused before anything went up
+        run(cfg, onshape, modules, "A1 Mini", PrintSettings(extras=(("layer_height", "0.16"),)))
+    assert bb.slice_bodies[-1]["process_overrides"]["layer_height"] == "0.16"

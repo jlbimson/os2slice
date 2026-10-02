@@ -169,6 +169,12 @@ class BambuddyModule:
     def slice(self, job: SliceInput, progress: Progress) -> SliceOutput:
         if job.media not in (None, MEDIA_GCODE_3MF):
             raise ModuleError(f"BamBuddy can't make {job.media} files", "Pick another slicer")
+        if job.settings.filament_overrides(job.bed_type):
+            raise ModuleError(
+                "BamBuddy slices with its filament presets as they are",
+                "Leave the panel's filament settings (temperatures, flow...) empty for "
+                "this printer",
+            )
         printer = job.printer
         dual = printer.nozzle_count > 1
         filaments = distinct_materials(job.parts)
