@@ -91,7 +91,7 @@ def test_pool_status_merges_the_models_printers() -> None:
     petg = by_id["PETG.000000"]
     assert petg.kind == "PETG" and petg.colour == "#000000" and petg.extruder is None
     assert petg.profile == "Generic PETG @BBL A1M"
-    assert petg.label == "PETG · black (loaded on 1 of 2)"
+    assert petg.label == "PETG · black (loaded on 1 of 2 printers)"
     assert all(r.method == "GET" for r in fake.requests)
 
 
@@ -326,3 +326,14 @@ def test_cli_print_passes_the_choice(
     monkeypatch.setattr(cli, "_confirm", lambda prompt: True)
     assert cli.main(["print", "--url", URL, "--part", "JHD", *flag]) == 0
     assert fake.queued[0]["manual_start"] is waits
+
+
+def test_loaded_note_counts_slots_and_printers_separately() -> None:
+    """ "loaded on 3 of 2" read as nonsense: slots and printers are now named."""
+    from os2slice.modules.bambuddy import _loaded_note
+
+    assert _loaded_note(1, 1, 1) == " (loaded)"
+    assert _loaded_note(2, 1, 1) == " (loaded in 2 slots)"
+    assert _loaded_note(1, 1, 2) == " (loaded on 1 of 2 printers)"
+    assert _loaded_note(3, 2, 2) == " (loaded in 3 slots on 2 of 2 printers)"
+    assert _loaded_note(2, 2, 3) == " (loaded on 2 of 3 printers)"

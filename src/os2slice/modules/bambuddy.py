@@ -430,7 +430,7 @@ class BambuddyModule:
                 id=pool_material_id(slot.material, slot.color if slot.color_known else ""),
                 label=f"{slot.brand or slot.material} · "
                 + (color_name(slot.color) if slot.color_known else "any colour")
-                + (f" (loaded on {len(on)} of {n})" if n > 1 else " (loaded)"),
+                + _loaded_note(len(on), len(set(on)), n),
                 kind=slot.material,
                 colour=slot.color if slot.color_known else None,
                 profile=match_preset(slot, suffix, names) or "",
@@ -570,6 +570,15 @@ def _status_of(raw: Mapping[str, Any], materials: tuple[Material, ...]) -> Print
         materials=materials,
         raw=raw,
     )
+
+
+def _loaded_note(slots: int, printers: int, members: int) -> str:
+    """ " (loaded …)" for a pool material: how many slots hold it, on how many of the
+    model's printers. `slots` counts AMS slots and external spools across the members."""
+    where = f" in {slots} slots" if slots > printers else ""
+    if members > 1:
+        return f" (loaded{where} on {printers} of {members} printers)"
+    return f" (loaded{where})"
 
 
 def pool_material_id(kind: str, colour: str) -> str:

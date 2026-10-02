@@ -119,7 +119,7 @@ slicer = "orca-api"              # any of: slicer, profiles (per field), bed_mm,
   each filament prints on the nozzle its slot feeds is skipped. A
   `[printers."Any <model>"]` entry overrides a pool like any discovered printer.
 - A pool's filament menu (panel and page): first the loaded (type, colour) pairs,
-  labelled "PETG · black (loaded)" ("(loaded on 1 of 2)" with several printers), each
+  labelled "PETG · black (loaded)" ("(loaded in 3 slots on 2 of 2 printers)" with several printers), each
   matched to its preset by name (D-19); then every filament preset made for the model,
   sorted and labelled without the suffix: BamBuddy's cached preset names ending in the
   configured filament's `@BBL <code>` or in `@<printer preset>` (Bambu Studio's name
