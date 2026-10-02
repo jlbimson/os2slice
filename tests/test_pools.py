@@ -287,6 +287,26 @@ def test_wait_checkbox_unchecked_even_when_the_target_says_wait(cfg: config.Conf
         run.httpd.shutdown()
 
 
+def test_wait_checkbox_follows_the_print_default(cfg: config.Config) -> None:
+    """`[print_defaults] wait_for_start = true` ticks the box on both pages; the
+    person's choice still wins (unticked = not sent = start by itself)."""
+    run = Running(
+        dataclasses.replace(cfg, default_wait_for_start=True),
+        FakeBambuddy(job_states=["completed"]),
+    )
+    try:
+        r, form = run.get_form()
+        assert " checked" in _checkbox(r.text)
+        r2, _ = panel_form(run)
+        assert " checked" in _checkbox(r2.text)
+        r = run.post({**form, **choices()})  # the person unticked it
+        assert r.status_code == 303
+        wait_job(run, r.headers["Location"])
+        assert run.fake.queued[0]["manual_start"] is False
+    finally:
+        run.httpd.shutdown()
+
+
 def test_wait_choice_refusal_keeps_the_token(running: Running) -> None:
     _, form = running.get_form()
     r = running.post({**form, **choices(manual_start="yes")})
@@ -303,25 +323,34 @@ def test_wait_choice_refusal_keeps_the_token(running: Running) -> None:
 def test_cli_wait_for_start_flag() -> None:
     p = cli.build_parser()
     base = ["print", "--url", URL]
-    assert p.parse_args(base).wait_for_start is False  # default: start by itself
+    assert p.parse_args(base).wait_for_start is None  # unset: [print_defaults] decides
     assert p.parse_args([*base, "--wait-for-start"]).wait_for_start is True
-    with pytest.raises(SystemExit):
-        p.parse_args([*base, "--no-wait-for-start"])  # gone with the config default
+    assert p.parse_args([*base, "--no-wait-for-start"]).wait_for_start is False
 
 
 @pytest.mark.parametrize(
-    ("flag", "target_says_wait", "waits"),
-    [([], False, False), (["--wait-for-start"], False, True), ([], True, False)],
+    ("flag", "target_says_wait", "default_wait", "waits"),
+    [
+        ([], False, False, False),
+        (["--wait-for-start"], False, False, True),
+        (["--no-wait-for-start"], False, False, False),
+        ([], True, False, False),
+        ([], False, True, True),  # [print_defaults] wait_for_start = true
+        (["--no-wait-for-start"], False, True, False),
+        (["--wait-for-start"], False, True, True),
+    ],
 )
 def test_cli_print_passes_the_choice(
     cfg: config.Config,
     monkeypatch: pytest.MonkeyPatch,
     flag: list[str],
     target_says_wait: bool,
+    default_wait: bool,
     waits: bool,
 ) -> None:
     if target_says_wait:  # deprecated `manual_start = true`: the CLI still starts
         cfg = waiting(cfg)
+    cfg = dataclasses.replace(cfg, default_wait_for_start=default_wait)
     fake = FakeBambuddy(job_states=["completed"])
     real = registry.Modules.from_config.__func__  # type: ignore[attr-defined]
     monkeypatch.setattr(

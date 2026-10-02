@@ -1624,7 +1624,7 @@ PRINT_SETTING_NAMES = {
 }  # fmt: skip
 DEFAULT_NAMES = {
     "walls", "infill", "supports", "build_plate_only", "top_layers", "bottom_layers", "brim",
-    "copies", "bed_type",
+    "copies", "bed_type", "wait_for_start",
 }  # fmt: skip
 
 
@@ -1640,6 +1640,7 @@ def _defaults_vals(cfg: config.Config) -> dict[str, str]:
         "brim": "on" if p.brim else "",
         "copies": str(p.copies),
         "bed_type": cfg.default_bed_type or "",
+        "wait_for_start": "on" if cfg.default_wait_for_start else "",
     }
 
 
@@ -1662,6 +1663,9 @@ def _get_defaults(ctx: Ctx, params: dict[str, str], vals: Mapping[str, str] | No
         + num("copies", "Copies", COPIES_RANGE)
         + _select("bed_type", "Build plate", _plate_choices(), v.get("bed_type", ""),
                   "a printer's or model's own plate wins")
+        + _check("wait_for_start", "Wait for Start by default (queued prints wait for a "
+                 "person; every target)", bool(v.get("wait_for_start")),
+                 "the Wait for Start box starts ticked; people can untick it per print")
     )  # fmt: skip
     body = (
         _saved(params) + _msg(error, "bad")
@@ -1680,6 +1684,9 @@ def _post_defaults(ctx: Ctx, form: dict[str, str]) -> None:
             s = PrintSettings.from_strings(strings, PrintSettings())
         except BadRequest as e:
             raise Invalid(e.message) from e
+        if vals["wait_for_start"] not in ("", "on"):
+            raise Invalid("Invalid Wait for Start choice")
+        wait = vals["wait_for_start"] == "on"
 
         def mutate(data: dict[str, Any]) -> None:
             tbl: dict[str, Any] = {
@@ -1694,6 +1701,7 @@ def _post_defaults(ctx: Ctx, form: dict[str, str]) -> None:
             }
             if vals["bed_type"]:
                 tbl["bed_type"] = vals["bed_type"]
+            tbl["wait_for_start"] = wait
             data["print_defaults"] = tbl
 
         _save(ctx.svc, mutate, "print_defaults")

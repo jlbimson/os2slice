@@ -194,6 +194,24 @@ def test_orca_sidecar_to_moonraker_uploads_gcode_and_waits(
     assert "start it from Mainsail" in out.submission.detail
 
 
+def test_orca_sidecar_to_moonraker_starts_by_default(
+    tmp_path: Path, onshape: OnshapeClient
+) -> None:
+    """Wait for Start unticked (the default, D-33): the upload asks Moonraker to print."""
+    cfg = voron_config(tmp_path)
+    voron, orca = FakeMoonraker(), FakeSidecar("afk")
+    with Modules.from_config(
+        cfg,
+        secrets=secrets({}),
+        transports={"voron": httpx.MockTransport(voron), "orca-api": orca.transport()},
+    ) as modules:
+        plan, out = run(cfg, onshape, modules, "voron")
+    assert not plan.manual_start
+    (upload,) = voron.uploads
+    assert upload["print"] == "true"
+    assert out.submission is not None and out.submission.state == "started"
+
+
 # -- (c) OrcaSlicer sidecar → PrusaLink -------------------------------------------------
 
 
@@ -222,6 +240,31 @@ def test_orca_sidecar_to_prusalink_puts_without_printing(
     assert put.url.path.endswith(".gcode") and put.content == out.slice.data
     assert put.headers["Print-After-Upload"] == "?0" and put.headers["Overwrite"] == "?0"
     assert out.submission is not None and out.submission.state == "waiting"
+
+
+def test_orca_sidecar_to_prusalink_starts_by_default(
+    tmp_path: Path, onshape: OnshapeClient
+) -> None:
+    """Wait for Start unticked (the default, D-33): Print-After-Upload asks it to print."""
+    cfg = parse(
+        tmp_path,
+        slicers={"orca-api": {"kind": "orca-slicer-api", "url": "http://orca.test:3003"}},
+        targets={"mk4": {"kind": "prusalink", "url": PRUSALINK_URL}},
+        printers={
+            "MK4": {"target": "mk4", "slicer": "orca-api", "model": "MK4", "profiles": MK4_PROFILES}
+        },
+    )
+    mk4, orca = FakePrusaLink(), FakeSidecar("afk")
+    with Modules.from_config(
+        cfg,
+        secrets=secrets({"targets.mk4.api_key": "secret-key"}),
+        transports={"mk4": httpx.MockTransport(mk4), "orca-api": orca.transport()},
+    ) as modules:
+        plan, out = run(cfg, onshape, modules, "MK4")
+    assert not plan.manual_start
+    (put,) = mk4.uploads
+    assert put.headers["Print-After-Upload"] == "?1"
+    assert out.submission is not None and out.submission.state == "started"
 
 
 # -- (d) pairings refused at load ----------------------------------------------------

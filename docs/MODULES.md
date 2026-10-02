@@ -186,7 +186,8 @@ signing in at `/admin/login`:
   with **Override** to create `[printers."<name>"]`) and `default_printer`. Profile
   fields suggest the names the chosen slicer's `profiles()` returns.
 - **Onshape** (`/admin/onshape`), **Server** (`/admin/server`), **Print defaults**
-  (`/admin/defaults`), **Onshape panel** (`/admin/panel`: the "Open in …" slicers and
+  (`/admin/defaults`, including **Wait for Start by default**, `wait_for_start`),
+  **Onshape panel** (`/admin/panel`: the "Open in …" slicers and
   extra settings, `[panel]`), **Secrets** (`/admin/secrets`: every `<section>.<key>.<field>`
   the config implies, write-only), **Jobs** (`/admin/jobs`), **Log** (`/admin/log`),
   **Password** (`/admin/password`: change it, given the current one); **Sign out** is
@@ -221,9 +222,12 @@ filled-in secret option replaces its page value at each start (D-32).
 3. On Print: export + orient as today → `SliceInput` → the printer's slicer →
    `SliceOutput` → the printer's target `submit(start=not wait)`, where `wait` is the
    person's **Wait for Start** checkbox (form field `manual_start`, absent or `on`; the
-   CLI's `--wait-for-start`). It always starts unchecked, so prints start by themselves
-   unless the person ticks it (D-33); a target's `manual_start` setting is deprecated,
-   still accepted, and has no effect. The Print button's same-origin POST
+   CLI's `--wait-for-start` / `--no-wait-for-start`). Its initial state is the global
+   print default `[print_defaults] wait_for_start` (bool, default `false`, set on
+   `/admin/defaults`; it applies to every target, Moonraker and PrusaLink included), so
+   by default prints start by themselves unless the person ticks it (D-33); the
+   person's choice always wins, and `plan_print` takes it as an explicit bool. A
+   target's `manual_start` setting is deprecated, still accepted, and has no effect. The Print button's same-origin POST
    with its CSRF token, or the CLI's `[y/N]`, is the human confirmation (D-13). The job
    page shows the `Submission`.
 4. Multi-material (D-20) and copies (D-25): the core exports the parts and orients them

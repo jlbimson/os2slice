@@ -1073,12 +1073,14 @@ def _print_form(
 
 
 def _wait_field(svc: Service) -> str:
-    """The Wait for Start checkbox (D-13: the person printing chooses). Always unchecked
-    at first: prints start by themselves unless the person ticks it (D-33). A target's
-    `manual_start` config value is deprecated and doesn't change that."""
+    """The Wait for Start checkbox (D-13: the person printing chooses). Its initial state
+    is `[print_defaults] wait_for_start` (default unchecked: prints start by themselves,
+    D-33); the person's tick wins. A target's `manual_start` config value is deprecated
+    and doesn't change it."""
     where = svc.start_note() or "the queue"
+    checked = " checked" if svc.cfg.default_wait_for_start else ""
     return (
-        f'<label class="check"><input type="checkbox" name="manual_start" value="on">'
+        f'<label class="check"><input type="checkbox" name="manual_start" value="on"{checked}>'
         f" Wait for Start in {_e(where)} (don't start by itself)</label>"
     )
 
