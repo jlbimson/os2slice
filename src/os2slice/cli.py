@@ -105,9 +105,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pr.add_argument(
         "--wait-for-start",
-        action="store_true",
-        help="leave the queued print waiting until someone presses Start (default: the "
-        "print starts by itself once the printer is free)",
+        action=argparse.BooleanOptionalAction,
+        help="leave the queued print waiting until someone presses Start; "
+        "--no-wait-for-start: it starts by itself once the printer is free "
+        "(default: [print_defaults] wait_for_start, normally off)",
     )
     pr.set_defaults(func=cmd_print)
 
@@ -219,7 +220,9 @@ def cmd_print(args: argparse.Namespace) -> int:
         plan = printing.plan_print(
             req, cfg, onshape, modules, args.printer, orientation, settings,
             slots[0] if slots else None, args.plate, extra,
-            manual_start=args.wait_for_start,
+            manual_start=(
+                cfg.default_wait_for_start if args.wait_for_start is None else args.wait_for_start
+            ),
         )  # fmt: skip
         print("\n".join(plan.summary_lines()))
         queue = not args.slice_only

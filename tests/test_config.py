@@ -139,6 +139,17 @@ def test_deprecated_manual_start_true_still_loads() -> None:
     assert legacy.targets["bambuddy"].values["manual_start"] is True
 
 
+def test_print_default_wait_for_start() -> None:
+    assert _parse({}).default_wait_for_start is False
+    assert _parse({"print_defaults": {"walls": 3}}).default_wait_for_start is False
+    cfg = _parse({"print_defaults": {"wait_for_start": True, "walls": 3}})
+    assert cfg.default_wait_for_start is True and cfg.print_defaults.walls == 3
+    assert config.load().default_wait_for_start is False  # the shipped default
+    for bad in ("yes", 1, "true"):
+        with pytest.raises(ConfigError, match="wait_for_start must be true or false"):
+            _parse({"print_defaults": {"wait_for_start": bad}})
+
+
 def test_a_slicer_module_and_a_desktop_slicer_side_by_side() -> None:
     cfg = _parse(
         {

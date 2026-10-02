@@ -97,6 +97,8 @@ class Config:
     default_printer: str = ""  # a printer key or name
     print_defaults: PrintSettings = field(default_factory=PrintSettings)
     default_bed_type: str | None = None  # [print_defaults] bed_type
+    # [print_defaults] wait_for_start: the Wait for Start box's initial state (D-33)
+    default_wait_for_start: bool = False
     server: ServerConfig = field(default_factory=lambda: ServerConfig())
     web_studio: WebStudioConfig | None = None
     web_orca: WebStudioConfig | None = None  # the same for the web OrcaSlicer (orca-web)
@@ -350,10 +352,15 @@ def parse(data: dict[str, Any], path: Path) -> Config:
             "brim",
             "copies",
             "bed_type",
+            "wait_for_start",
         },
     )
+    default_wait_for_start = pd.get("wait_for_start", False)
+    if not isinstance(default_wait_for_start, bool):
+        raise fail("print_defaults.wait_for_start must be true or false")
     try:
-        print_defaults = PrintSettings(**{k: pd[k] for k in pd if k != "bed_type"})
+        not_settings = ("bed_type", "wait_for_start")
+        print_defaults = PrintSettings(**{k: pd[k] for k in pd if k not in not_settings})
         default_bed_type = check_bed_type(pd.get("bed_type"))
     except BadRequest as e:
         raise fail(f"[print_defaults]: {e.message}") from e
@@ -420,6 +427,7 @@ def parse(data: dict[str, Any], path: Path) -> Config:
         default_printer=default_printer,
         print_defaults=print_defaults,
         default_bed_type=default_bed_type,
+        default_wait_for_start=default_wait_for_start,
         server=server_cfg,
         web_studio=web_studio,
         web_orca=web_orca,

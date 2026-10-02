@@ -69,7 +69,9 @@ file: `Submission(state="waiting", detail="Uploaded to <folder>/<name>; start it
 Mainsail or Fluidd", url=ui_url)`. With `start=True` it sends `print=true`; the reply's
 `print_started` gives `started`; `print_queued` (Moonraker's job queue is enabled) is
 also reported as `started`, since the queue will start it on its own; neither (printer
-busy) is reported as `waiting`. The `job_queue` API isn't used.
+busy) is reported as `waiting`. The `job_queue` API isn't used. Since D-33 `start=True`
+is the default (Wait for Start unticked), so `print=true` is what normally goes out;
+like the rest of this page it is read from the docs and not yet verified on a printer.
 
 ## PrusaLink, kind `prusalink`
 
@@ -117,7 +119,10 @@ whether a 409 can also mean "printer busy" when `Print-After-Upload: ?1`.
 `submit(start=False)` sends `Print-After-Upload: ?0` explicitly (the default, sent anyway
 so nothing depends on it), so the file is only saved: `Submission(state="waiting",
 detail="Saved on the printer's USB as <name>; start it from the printer's screen or
-PrusaLink", url=<printer url>)`. `start=True` sends `?1` and reports `started`.
+PrusaLink", url=<printer url>)`. `start=True` sends `?1` and reports `started`. Since D-33
+`start=True` is the default (Wait for Start unticked); whether `?1` really starts the
+print (and what a busy printer answers) is read from the spec and not yet verified on a
+printer.
 
 ## Live tests
 

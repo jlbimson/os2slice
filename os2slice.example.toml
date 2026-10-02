@@ -79,6 +79,7 @@ bottom_layers = 3        # solid bottom layers
 brim = false             # true: outer brim; false: no brim
 copies = 1               # copies of the selection on one plate (1-25)
 bed_type = "High Temp Plate"   # smooth PEI; per-model [bambuddy.presets.*] bed_type wins
+# wait_for_start = false  # true: the Wait for Start box starts ticked (every target; /admin)
 
 # ---- More modules (commented examples; docs/MODULES.md) ----
 #

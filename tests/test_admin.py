@@ -465,6 +465,40 @@ def test_unknown_form_fields_are_refused(logged: Admin) -> None:
     assert r.status_code == 400
 
 
+DEFAULTS_FORM = {"walls": "2", "infill": "15", "supports": "off", "top_layers": "5",
+                 "bottom_layers": "3", "copies": "1", "bed_type": ""}  # fmt: skip
+
+
+def _wait_box(html: str) -> str:
+    m = re.search(r'<input type="checkbox" name="wait_for_start"[^>]*>', html)
+    assert m, html
+    return m.group(0)
+
+
+def test_defaults_wait_for_start_shown_and_saved(logged: Admin) -> None:
+    page = logged.get("/admin/defaults").text
+    assert "Wait for Start by default" in page and "every target" in page
+    assert "checked" not in _wait_box(page)
+    r = logged.submit("/admin/defaults", "/admin/defaults",
+                      {**DEFAULTS_FORM, "wait_for_start": "on"})  # fmt: skip
+    assert r.status_code == 303
+    assert "wait_for_start = true" in logged.path.read_text()
+    assert logged.svc.cfg.default_wait_for_start is True  # reloaded
+    assert " checked" in _wait_box(logged.get("/admin/defaults").text)
+    r = logged.submit("/admin/defaults", "/admin/defaults", DEFAULTS_FORM)  # unticked
+    assert r.status_code == 303
+    assert logged.svc.cfg.default_wait_for_start is False
+    assert "checked" not in _wait_box(logged.get("/admin/defaults").text)
+
+
+def test_defaults_bad_wait_for_start_is_refused(logged: Admin) -> None:
+    before = logged.path.read_bytes()
+    r = logged.submit("/admin/defaults", "/admin/defaults",
+                      {**DEFAULTS_FORM, "wait_for_start": "yes"})  # fmt: skip
+    assert r.status_code == 400 and "Invalid Wait for Start choice" in r.text
+    assert logged.path.read_bytes() == before
+
+
 def test_secrets_are_never_rendered_or_written(tmp_path: Path, monkeypatch) -> None:
     stored: dict[str, str] = {}
     monkeypatch.setattr("keyring.set_password", lambda s, n, v: stored.__setitem__(n, v))

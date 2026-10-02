@@ -37,6 +37,8 @@ The service has a config page for printers and slicers (modules), print defaults
 
 **What persists.** `config.toml` (`/data/os2slice/config.toml`) is written from the options on the first start and whenever the options it is built from change (or a new add-on version builds it differently); otherwise it is kept as it is, so edits made on `/admin` persist across restarts. Changing any of those options on the Configuration tab replaces the file, and with it the page's edits, so after you start using `/admin` treat the page as the place for settings. `reset_config` forces that rewrite once. Settings on the page's Server and Onshape sections need a restart; everything else applies at once.
 
+**Wait for Start default.** Whether the **Wait for Start** box starts ticked is set on the page under **Print defaults** ("Wait for Start by default"), not on the Configuration tab. It applies to every target (BamBuddy, Moonraker, PrusaLink); whoever prints can still change it per print. It is off unless you turn it on.
+
 **Secrets.** Secrets saved on the page go to `/data/state/os2slice/secrets.json` (readable only by the service), never into `config.toml`. Which one is used:
 
 1. A secret option filled in on the Configuration tab (`bambuddy_api_key`, the Onshape keys, the OAuth client secret) always wins: at each start it replaces the same secret saved on the page. A value saved on the page while the option is filled in is used only until the next start.
