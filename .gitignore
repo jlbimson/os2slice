@@ -30,3 +30,6 @@ docs/PLAN.md
 /orca-profiles/
 .claude/worktrees/
 /admin-password.txt
+
+# The panel script test (tests/js): npm ci installs jsdom here
+/tests/js/node_modules/

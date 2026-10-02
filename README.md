@@ -127,6 +127,7 @@ The same settings live in `config.toml`; [`os2slice.example.toml`](os2slice.exam
 ```bash
 uv tool install -e .          # or: pipx install -e .
 uv run pytest -q              # unit tests (Onshape and BamBuddy are faked)
+(cd tests/js && npm ci)       # optional: Node + jsdom, for the panel script's test
 uv run ruff check . && uv run ruff format --check .
 os2slice doctor
 ```
