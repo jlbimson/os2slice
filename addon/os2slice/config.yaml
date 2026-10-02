@@ -1,7 +1,10 @@
 # Home Assistant local add-on (deployed to /local_apps/os2slice by scripts/deploy_addon.sh).
 name: os2slice
-version: "0.3.0"
+version: "0.3.1"
 slug: os2slice
+url: https://github.com/jlbimson/os2slice
+# `webui` (the info page's Open Web UI button -> /admin) is added by scripts/deploy_addon.sh
+# from the installed add-on's first `hosts` entry.
 description: Print Onshape parts through BamBuddy, with orientation and settings, and a config page at /admin (LAN only)
 arch:
   - amd64

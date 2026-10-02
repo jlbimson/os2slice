@@ -31,7 +31,7 @@ The log starts with a pass/fail table from `os2slice doctor`.
 
 ## The config page `/admin`
 
-The service has a config page for printers and slicers (modules), print defaults, the Onshape and server settings, secrets, `doctor`, jobs and the log, at `https://<host>:8443/admin` (the first of `hosts`, e.g. `https://print.example.duckdns.org:8443/admin`).
+The service has a config page for printers and slicers (modules), print defaults, the Onshape and server settings, secrets, `doctor`, jobs and the log, at `https://<host>:8443/admin` (the first of `hosts`, e.g. `https://print.example.duckdns.org:8443/admin`). The add-on's info page in Home Assistant has an **Open Web UI** button for it, set from `hosts` when the add-on is deployed (so it appears from the second deploy on).
 
 **Password.** The page is off until you set `admin_password` on the Configuration tab and restart the add-on. The add-on stores only a hash of it (`/data/state/os2slice/admin.json`); the password is never logged. A restart with the same password keeps everyone signed in; a new one signs every admin session out. Clearing the option later doesn't turn the page off: the stored password keeps working (delete `admin.json` to remove it). A password shorter than 12 characters stops the add-on with an error saying so. There is no way to set the password from a browser.
 

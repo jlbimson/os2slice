@@ -43,6 +43,19 @@ deploy() {
   stage "$tmp/$addon" "$addon"
   local version
   version="$(sed -n 's/^version: *"\(.*\)"/\1/p' "$tmp/$addon/config.yaml")"
+  if [ "$addon" = os2slice ]; then
+    # "Open Web UI" on the add-on's info page -> the config page. The manifest's webui
+    # can't use [HOST] (os2slice checks Host against its `hosts` option and its
+    # certificate is for that name), so take the first configured host from the
+    # installed add-on's options; a fresh install gets the button on its next deploy.
+    local host
+    host="$(ssh_ha "ha apps info $slug --raw-json 2>/dev/null" \
+      | sed -n 's/.*"hosts":\["\([^"]*\)".*/\1/p' | grep -E '^[A-Za-z0-9.-]+(:[0-9]{1,5})?$' || true)"
+    if [ -n "$host" ]; then
+      printf 'webui: "https://%s/admin"\n' "$host" >> "$tmp/$addon/config.yaml"
+      echo "webui: https://$host/admin"
+    fi
+  fi
   tar -C "$tmp" -c "$addon" | ssh_ha "rm -rf /local_apps/$addon && tar -x -C /local_apps"
   # Wait until the store has read the new version: building before that tags the image
   # with the old version, and the start then fails with "image ... does not exist".
