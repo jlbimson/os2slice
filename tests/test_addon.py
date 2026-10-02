@@ -48,8 +48,10 @@ def test_prepare_renders_a_valid_lan_config(
     assert cfg.server.identity == "lan" and cfg.server.bind == "0.0.0.0"
     assert cfg.server.hosts == ("print.example.duckdns.org:8443",)
     assert cfg.server.tls_cert == Path("/ssl/fullchain.pem")
-    assert cfg.server.redirect_port == addon.REDIRECT_PORT == 8080
-    assert "redirect_port = 8080" in path.read_text()
+    # The redirect port travels by environment, not config.toml: a changed rendering
+    # would make _write_config replace the file and drop the edits made on /admin.
+    assert os.environ["OS2SLICE_REDIRECT_PORT"] == str(addon.REDIRECT_PORT) == "8080"
+    assert cfg.server.redirect_port == 0 and "redirect_port" not in path.read_text()
     # The add-on still writes [bambuddy]; it's read as [targets.bambuddy] (docs/MODULES.md).
     bambuddy = cfg.targets["bambuddy"]
     assert bambuddy.kind == "bambuddy" and bambuddy.values["url"] == "http://172.30.32.1:8000"

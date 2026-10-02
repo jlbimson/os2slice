@@ -307,19 +307,26 @@ def make_handler(service: Service) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-def serve(service: Service) -> None:
+def serve(service: Service, redirect_port: int | None = None) -> None:
+    """Run the service. `redirect_port` overrides [server] redirect_port (the add-on
+    passes its own); like the config value it needs identity = "lan"."""
     httpd = make_server(service)
     s = service.cfg.server
+    if redirect_port is None:
+        redirect_port = s.redirect_port
+    elif s.identity != "lan" and redirect_port:
+        log.error('ignoring redirect port %s: it needs identity = "lan"', redirect_port)
+        redirect_port = 0
     scheme = "https" if s.tls_cert else "http"
     log.info("serving on %s://%s:%s (hosts %s, identity %s)", scheme, s.bind, s.port, s.hosts,
              s.identity)  # fmt: skip
     print(f"os2slice serving on {scheme}://{s.bind}:{s.port} for {', '.join(s.hosts)}")
     redirect = None
-    if s.redirect_port:
+    if redirect_port:
         target = f"https://{s.hosts[0]}/admin"
-        redirect = make_redirect_server(s.bind, s.redirect_port, target)
+        redirect = make_redirect_server(s.bind, redirect_port, target)
         threading.Thread(target=redirect.serve_forever, daemon=True).start()
-        log.info("redirecting http://%s:%s to %s", s.bind, s.redirect_port, target)
+        log.info("redirecting http://%s:%s to %s", s.bind, redirect_port, target)
     try:
         httpd.serve_forever()
     finally:

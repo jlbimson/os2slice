@@ -257,7 +257,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
     except BaseException:
         modules.close()
         raise
-    server.serve(service)  # closes the service's modules when it stops
+    override = os.environ.get("OS2SLICE_REDIRECT_PORT", "")  # the add-on (addon.py)
+    redirect_port = int(override) if override.isdigit() else None
+    server.serve(service, redirect_port=redirect_port)  # closes the modules when it stops
     return 0
 
 

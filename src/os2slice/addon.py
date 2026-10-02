@@ -105,7 +105,6 @@ def render_config(opts: dict[str, Any], ssl_dir: Path = SSL) -> str:
         'identity = "lan"',
         'bind = "0.0.0.0"',
         f"port = {PORT}",
-        f"redirect_port = {REDIRECT_PORT}",
         f"hosts = [{', '.join(s(h) for h in hosts)}]",
         f"tls_cert = {s(ssl_dir / opts.get('certfile', 'fullchain.pem'))}",
         f"tls_key = {s(ssl_dir / opts.get('keyfile', 'privkey.pem'))}",
@@ -259,6 +258,9 @@ def prepare(
     os.environ.setdefault("PYTHON_KEYRING_BACKEND", "keyring.backends.null.Keyring")
     os.environ["OS2SLICE_ADDON"] = "1"
     os.environ["OS2SLICE_RUNTIME"] = "home-assistant"
+    # Not in config.toml: a changed rendering would count as "the options changed" and
+    # replace the file, dropping the edits made on /admin. `serve` reads this instead.
+    os.environ["OS2SLICE_REDIRECT_PORT"] = str(REDIRECT_PORT)
     _apply_admin_password(password, state / "admin.json", say)
     path = data / "os2slice" / "config.toml"
     _write_config(text, path, bool(opts.get("reset_config")), say)
