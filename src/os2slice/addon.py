@@ -41,6 +41,7 @@ OPTIONS = Path("/data/options.json")
 DATA = Path("/data")
 SSL = Path("/ssl")
 PORT = 8443  # inside the container; the host port is set on the add-on's Network tab
+REDIRECT_PORT = 8080  # plain HTTP, only 303s to https://<hosts[0]>/admin (Open Web UI)
 SECRET_OPTIONS = {  # option -> environment variable, by [onshape] auth mode (D-23)
     "keys": {
         "onshape_access_key": "ONSHAPE_ACCESS_KEY",
@@ -104,6 +105,7 @@ def render_config(opts: dict[str, Any], ssl_dir: Path = SSL) -> str:
         'identity = "lan"',
         'bind = "0.0.0.0"',
         f"port = {PORT}",
+        f"redirect_port = {REDIRECT_PORT}",
         f"hosts = [{', '.join(s(h) for h in hosts)}]",
         f"tls_cert = {s(ssl_dir / opts.get('certfile', 'fullchain.pem'))}",
         f"tls_key = {s(ssl_dir / opts.get('keyfile', 'privkey.pem'))}",

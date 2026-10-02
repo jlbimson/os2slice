@@ -56,6 +56,7 @@ from os2slice.oauth import (
 from os2slice.oauth import static_bearer as oauth_static_bearer
 from os2slice.onshape import OnshapeClient
 from os2slice.orientation import FACE_ID_RE, Orientation
+from os2slice.redirect import make_redirect_server
 from os2slice.request import PART_ID_RE, ExportRequest, parse_print_query
 from os2slice.settings import (
     COPIES_RANGE,
@@ -313,10 +314,19 @@ def serve(service: Service) -> None:
     log.info("serving on %s://%s:%s (hosts %s, identity %s)", scheme, s.bind, s.port, s.hosts,
              s.identity)  # fmt: skip
     print(f"os2slice serving on {scheme}://{s.bind}:{s.port} for {', '.join(s.hosts)}")
+    redirect = None
+    if s.redirect_port:
+        target = f"https://{s.hosts[0]}/admin"
+        redirect = make_redirect_server(s.bind, s.redirect_port, target)
+        threading.Thread(target=redirect.serve_forever, daemon=True).start()
+        log.info("redirecting http://%s:%s to %s", s.bind, s.redirect_port, target)
     try:
         httpd.serve_forever()
     finally:
         httpd.server_close()
+        if redirect is not None:
+            redirect.shutdown()
+            redirect.server_close()
         service.modules.close()  # the current ones; reload() closed those it replaced
 
 

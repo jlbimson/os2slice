@@ -48,6 +48,8 @@ def test_prepare_renders_a_valid_lan_config(
     assert cfg.server.identity == "lan" and cfg.server.bind == "0.0.0.0"
     assert cfg.server.hosts == ("print.example.duckdns.org:8443",)
     assert cfg.server.tls_cert == Path("/ssl/fullchain.pem")
+    assert cfg.server.redirect_port == addon.REDIRECT_PORT == 8080
+    assert "redirect_port = 8080" in path.read_text()
     # The add-on still writes [bambuddy]; it's read as [targets.bambuddy] (docs/MODULES.md).
     bambuddy = cfg.targets["bambuddy"]
     assert bambuddy.kind == "bambuddy" and bambuddy.values["url"] == "http://172.30.32.1:8000"
@@ -78,6 +80,8 @@ def test_addon_manifest_matches_the_entry_point() -> None:
     root = Path(__file__).resolve().parent.parent
     manifest = (root / "addon/os2slice/config.yaml").read_text()
     assert "8443/tcp: 8443" in manifest and f"{addon.PORT}/tcp" in manifest
+    assert "8080/tcp: 8444" in manifest and f"{addon.REDIRECT_PORT}/tcp" in manifest
+    assert 'webui: "http://[HOST]:[PORT:8080]/admin"' in manifest
     assert "host_network" not in manifest  # D-12: own network namespace
     secrets_ = {k for mode in addon.SECRET_OPTIONS.values() for k in mode}
     for key in (*secrets_, "onshape_auth", "onshape_oauth_client_id", "hosts", "presets",

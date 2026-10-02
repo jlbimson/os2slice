@@ -1539,7 +1539,9 @@ def _post_onshape(ctx: Ctx, form: dict[str, str]) -> None:
     ctx.redirect("/admin/onshape?saved=1")
 
 
-SERVER_NAMES = {"bind", "port", "hosts", "identity", "allowed_users", "tls_cert", "tls_key"}
+SERVER_NAMES = {
+    "bind", "port", "hosts", "identity", "allowed_users", "tls_cert", "tls_key", "redirect_port",
+}  # fmt: skip
 
 
 def _server_vals(cfg: config.Config) -> dict[str, str]:
@@ -1552,6 +1554,7 @@ def _server_vals(cfg: config.Config) -> dict[str, str]:
         "allowed_users": "\n".join(s.allowed_users),
         "tls_cert": str(s.tls_cert or ""),
         "tls_key": str(s.tls_key or ""),
+        "redirect_port": str(s.redirect_port or ""),
     }
 
 
@@ -1569,6 +1572,8 @@ def _get_server(ctx: Ctx, params: dict[str, str], vals: Mapping[str, str] | None
         + _area("allowed_users", "Tailscale logins (one per line)", v.get("allowed_users", ""))
         + _text("tls_cert", "TLS certificate (PEM chain)", v.get("tls_cert", ""))
         + _text("tls_key", "TLS private key", v.get("tls_key", ""))
+        + _text("redirect_port", "Redirect port (plain HTTP)", v.get("redirect_port", ""),
+                kind="number", help="lan only: redirects to the HTTPS /admin page; empty = off")
     )  # fmt: skip
     body = (
         _saved(params) + _msg(error, "bad")
@@ -1598,6 +1603,11 @@ def _post_server(ctx: Ctx, form: dict[str, str]) -> None:
         for k in ("tls_cert", "tls_key"):
             if vals[k].strip():
                 tbl[k] = vals[k].strip()
+        redirect_port = vals["redirect_port"].strip()
+        if redirect_port and redirect_port != "0":
+            if not re.fullmatch(r"[0-9]{1,5}", redirect_port):
+                raise Invalid("The redirect port must be a whole number, or empty for off")
+            tbl["redirect_port"] = int(redirect_port)
         data["server"] = tbl
 
     try:
