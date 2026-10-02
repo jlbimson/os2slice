@@ -27,6 +27,10 @@ NAV = {
     "Sec-Fetch-Site": "cross-site",
 }
 PRINT_QUERY = QUERY_WITH_CONFIG.replace("slicer=orca&", "")
+# A black filament's icon markup (filament_icons.option_content).
+BLACK_ICON = (
+    '<span class="fc-emoji">⬛ </span><span class="fc-swatch" style="background:#000000"></span>'
+)
 
 
 class Running:
@@ -434,7 +438,12 @@ def test_menu_lists_loaded_filament_and_preselects_it(srv: Running) -> None:
     # The A1 Mini's only loaded spool (external PETG) is chosen over the PLA preset.
     assert (
         '<option value="bambuddy/1|254" data-color="#000000" selected>'
-        "A1 Mini · External: PETG · black</option>" in r.text
+        f"{BLACK_ICON}A1 Mini · External: PETG · black</option>" in r.text
+    )
+    # Customizable selects show the chosen option's swatch in the closed menu.
+    assert (
+        '<select name="printer" class="fc" required><button><selectedcontent></selectedcontent>'
+        "</button><optgroup" in r.text
     )
     assert (
         '<option value="bambuddy/1">A1 Mini · preset filament (Bambu PLA Basic)</option>' in r.text
@@ -457,10 +466,14 @@ def test_panel_has_separate_printer_and_filament_menus(srv: Running) -> None:
     assert '<option value="bambuddy/1" selected>A1 Mini (A1 Mini), idle</option>' in r.text
     assert "|" not in re.search(r'<select name="printer".*?</select>', r.text, re.S).group(0)
     # Filament options for the default printer, its loaded spool preselected...
-    menu = re.search(r'<select name="filament" data-choices="([^"]*)">(.*?)</select>', r.text, re.S)
+    menu = re.search(
+        r'<select name="filament" class="fc" data-choices="([^"]*)">(.*?)</select>', r.text, re.S
+    )
     assert menu, r.text
-    assert '<option value="254" data-color="#000000" selected>External: PETG · black</option>' in (
-        menu.group(2)
+    assert menu.group(2).startswith("<button><selectedcontent></selectedcontent></button>")
+    assert (
+        f'<option value="254" data-color="#000000" selected>{BLACK_ICON}External: PETG · black'
+        "</option>" in menu.group(2)
     )
     assert '<option value="">Preset filament (Bambu PLA Basic)</option>' in menu.group(2)
     # ...and every printer's choices for panel.js to switch to.
@@ -899,8 +912,15 @@ def test_panel_printer_profile_menu_and_changer_tools() -> None:
         '<option value="" selected data-mmu>JoshPrint 0.5 MMU</option>'
         '<option value="JoshPrint 0.5">JoshPrint 0.5</option>'
     )
-    filament = re.search(r'<select name="filament" data-choices="([^"]*)">(.*?)</select>', html)
-    assert '<option value="t0" data-color="#000000" selected>T0: Black (ASA) → PM ASA</option>' in (
+    filament = re.search(
+        r'<select name="filament" class="fc" data-choices="([^"]*)">(.*?)</select>', html
+    )
+    assert (
+        f'<option value="t0" data-color="#000000" selected>{BLACK_ICON}T0: Black (ASA) → PM ASA'
+        "</option>" in filament.group(2)
+    )
+    # An empty gate keeps its data-color but gets no icon: it has no filament.
+    assert '<option value="t4" data-color="#FF8400" disabled>T4: empty</option>' in (
         filament.group(2)
     )
     choices = json.loads(_html.unescape(filament.group(1)))["joshprint"]

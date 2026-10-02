@@ -10,7 +10,7 @@
   const form = document.getElementById("printform");
   const orient = form.elements.orient;
   const faceOpt = orient.querySelector('option[value="face"]');
-  const button = form.querySelector("button");
+  const button = form.querySelector('button[type="submit"]'); // not a select's own button
   const shown = document.getElementById("selection");
   const extrasBox = document.getElementById("extras");
   const printer = form.elements.printer;
@@ -62,6 +62,85 @@
       .catch(() => {});
   }
 
+  // -- filament colour icons (port of os2slice/filament_icons.py: keep the two in agreement)
+  const BASE_SELECT = Boolean(window.CSS && CSS.supports && CSS.supports("appearance", "base-select"));
+  const SQUARES = {
+    red: "\u{1F7E5}", orange: "\u{1F7E7}", yellow: "\u{1F7E8}", green: "\u{1F7E9}",
+    blue: "\u{1F7E6}", purple: "\u{1F7EA}", brown: "\u{1F7EB}", black: "⬛", white: "⬜",
+  };
+  // "#RRGGBB" (upper case) from "#RRGGBB" or "#RRGGBBAA"; null for anything else.
+  function normaliseColour(colour) {
+    if (typeof colour !== "string") return null;
+    const m = /^#([0-9a-fA-F]{6})(?:[0-9a-fA-F]{2})?$/.exec(colour.trim());
+    return m ? `#${m[1].toUpperCase()}` : null;
+  }
+  // The coloured square nearest to a filament colour, or "" (same HSL rules as Python).
+  function colourEmoji(colour) {
+    const hex = normaliseColour(colour);
+    if (!hex) return "";
+    const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+    const top = Math.max(r, g, b);
+    const bottom = Math.min(r, g, b);
+    const chroma = top - bottom;
+    const lum = (top + bottom) / 2;
+    const sat = chroma === 0 ? 0 : chroma / (lum <= 0.5 ? top + bottom : 2 - top - bottom);
+    let hue = 0;
+    if (chroma !== 0) {
+      if (top === r) hue = ((g - b) / chroma) % 6;
+      else if (top === g) hue = (b - r) / chroma + 2;
+      else hue = (r - g) / chroma + 4;
+      hue = (hue * 60 + 360) % 360;
+    }
+    if (lum < 0.15) return SQUARES.black;
+    if (lum > 0.9) return SQUARES.white;
+    if (chroma < 0.1 || sat < 0.12) return lum >= 0.6 ? SQUARES.white : SQUARES.black;
+    if (hue < 12 || hue >= 335) return SQUARES.red;
+    if (hue < 70 && (top < 0.65 || (hue < 50 && sat < 0.45 && lum < 0.75))) return SQUARES.brown;
+    if (hue < 45) return SQUARES.orange;
+    if (hue < 70) return SQUARES.yellow;
+    if (hue < 165) return SQUARES.green;
+    if (hue < 255) return SQUARES.blue;
+    return SQUARES.purple;
+  }
+  // An option's content, like filament_icons.option_content: emoji, swatch, label.
+  function fillOption(opt, label, colour) {
+    const hex = normaliseColour(colour);
+    if (hex) {
+      const emoji = document.createElement("span");
+      emoji.className = "fc-emoji";
+      emoji.textContent = `${colourEmoji(hex)} `;
+      const swatch = document.createElement("span");
+      swatch.className = "fc-swatch";
+      swatch.style.background = hex;
+      opt.append(emoji, swatch, document.createTextNode(label));
+    } else {
+      opt.textContent = label;
+    }
+  }
+  // Empty a filament menu but keep its <button><selectedcontent> (customizable selects).
+  function clearOptions(select) {
+    for (const o of [...select.querySelectorAll("option, optgroup")]) o.remove();
+  }
+  // A filament menu made here: with customizable selects, the closed menu shows the swatch.
+  function filamentSelect() {
+    const select = document.createElement("select");
+    select.className = "fc";
+    if (BASE_SELECT) {
+      const b = document.createElement("button");
+      b.append(document.createElement("selectedcontent"));
+      select.append(b);
+    }
+    return select;
+  }
+  // Mirror the chosen option into <selectedcontent>, in case the browser didn't after a refill.
+  function showChosen(select) {
+    const shownContent = select.querySelector("selectedcontent");
+    if (!shownContent) return;
+    const o = select.options[select.selectedIndex];
+    shownContent.replaceChildren(...(o ? [...o.childNodes].map((n) => n.cloneNode(true)) : []));
+  }
+  const entryOf = (value) => (FILAMENTS[printerName()] || []).find((c) => c.value === value);
+
   const printerName = () => printer.value;
   const nameOf = (id) => parts[id] || id;
 
@@ -82,11 +161,11 @@
     const keep = filament.value;
     const all = FILAMENTS[printerName()] || [];
     const entries = changerProfile() ? all : all.filter((c) => !c.tool);
-    filament.replaceChildren();
+    clearOptions(filament);
     for (const c of entries) {
       const opt = document.createElement("option");
       opt.value = c.value;
-      opt.textContent = c.label;
+      fillOption(opt, c.label, c.empty ? "" : c.color); // an empty gate has no filament
       opt.disabled = Boolean(c.disabled);
       if (c.color) opt.dataset.color = c.color;
       if (c.tool) opt.dataset.tool = "";
@@ -99,6 +178,7 @@
       || (preferred && usable.find((c) => !c.tool && c.profile && c.profile === preferred.profile))
       || usable[0];
     if (pick) filament.value = pick.value;
+    showChosen(filament);
   }
 
   // Refill the printer profile menu for the chosen printer, like the process menu.
@@ -140,6 +220,7 @@
     return (FILAMENTS[printerName()] || []).filter((c) => c.tool).map((c) => ({
       value: c.value,
       label: c.label.split(" → ")[0].replace(/^(T\d+): /, "$1, now "),
+      color: c.color,
       profile: c.profile,
       empty: Boolean(c.empty),
     }));
@@ -150,17 +231,18 @@
   // else a tool that has that filament already, else an empty one, else T0.
   function fillToolMenu(select, keep, profile) {
     const tools = toolChoices();
-    select.replaceChildren();
+    clearOptions(select);
     for (const t of tools) {
       const opt = document.createElement("option");
       opt.value = t.value;
-      opt.textContent = t.label;
+      fillOption(opt, t.label, t.empty ? "" : t.color); // an empty gate has no filament
       select.append(opt);
     }
     const pick = tools.find((t) => t.value === keep)
       || tools.find((t) => profile && t.profile === profile && !t.empty)
       || tools.find((t) => t.empty) || tools[0];
     if (pick) select.value = pick.value;
+    showChosen(select);
     return tools.length > 0;
   }
 
@@ -189,12 +271,13 @@
     for (const id of extra) {
       const label = document.createElement("label");
       label.textContent = `Filament for ${nameOf(id)} `;
-      const select = document.createElement("select");
+      const select = filamentSelect();
       select.dataset.part = id;
       for (const o of options) {
         const opt = document.createElement("option");
+        const entry = entryOf(o.value);
         opt.value = o.value;
-        opt.textContent = o.textContent;
+        fillOption(opt, entry ? entry.label : o.textContent, o.dataset.color);
         opt.dataset.color = o.dataset.color || "";
         if (o.dataset.tool !== undefined) opt.dataset.tool = "";
         select.append(opt);
@@ -203,17 +286,19 @@
         select.value = chosen[id];
       }
       chosen[id] = select.value;
+      showChosen(select);
       label.append(select);
       extrasBox.append(label);
       // Its own "Load into" menu, when it's a filament that isn't loaded.
       const slotLabel = document.createElement("label");
       slotLabel.textContent = "Load into ";
-      const slot = document.createElement("select");
+      const slot = filamentSelect();
       slotLabel.append(slot);
       extrasBox.append(slotLabel);
       const renderSlot = () => {
         const opt = select.options[select.selectedIndex];
-        const profile = opt ? opt.textContent : "";
+        const entry = opt && entryOf(opt.value);
+        const profile = entry ? entry.profile : "";
         const show = needsTool(opt) && fillToolMenu(slot, slotPicks[id], profile);
         slotLabel.hidden = !show;
         chosenTool[id] = show ? slot.value : "";
