@@ -174,8 +174,9 @@ def layout(job: SliceInput, *, tower: tuple[float, float] | None = None) -> Proj
     Parts keep their relative placement (they were oriented and dropped together);
     the assembly, or the grid of its copies, is centred on the printer's bed. Each
     distinct material becomes a filament, pinned to its nozzle on dual-nozzle
-    printers (Material.extruder: 1 = left, 0 = right). Without materials every part
-    is filament 1.
+    printers (Material.extruder: 1 = left, 0 = right); with a filament changer's tools
+    (SliceInput.tools) every tool is a filament, in tool order. Without materials every
+    part is filament 1.
 
     `tower` is the front-left corner of the prime tower the caller will ask the slicer
     for (x, y, mm). It isn't written into the file (the tower position goes to the
@@ -192,7 +193,7 @@ def layout(job: SliceInput, *, tower: tuple[float, float] | None = None) -> Proj
     placed = [translate_xy(p.stl, dx, dy) for p in job.parts]
     gap = COPY_GAP + (BRIM_GAP if job.settings.brim else 0.0)
     offsets = copy_offsets((x1 - x0, y1 - y0), job.copies, (bed_w, bed_d), gap)
-    filaments = distinct_materials(job.parts)
+    filaments = job.tools or distinct_materials(job.parts)
     index = {m.id: n for n, m in enumerate(filaments, start=1)}
     profiles = tuple(m.profile for m in filaments) or (job.profiles.filament,)
     parts = [
@@ -200,7 +201,10 @@ def layout(job: SliceInput, *, tower: tuple[float, float] | None = None) -> Proj
         for p, stl in zip(job.parts, placed, strict=True)
     ]
     dual = job.printer.nozzle_count > 1
-    maps = [1 if m.extruder == 1 else 2 for m in filaments] if dual and filaments else None
+    # A printer pool's materials have no nozzle (the printer isn't known yet): no
+    # Manual filament map then, the slicer chooses.
+    pinned = dual and bool(filaments) and all(m.extruder is not None for m in filaments)
+    maps = [1 if m.extruder == 1 else 2 for m in filaments] if pinned else None
     ox0, oy0 = min(o[0] for o in offsets), min(o[1] for o in offsets)
     ox1, oy1 = max(o[0] for o in offsets), max(o[1] for o in offsets)
     footprint = (x0 + dx + ox0, y0 + dy + oy0, x1 + dx + ox1, y1 + dy + oy1)

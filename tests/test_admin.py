@@ -453,11 +453,50 @@ def test_validation_failure_rerenders_without_writing(logged: Admin) -> None:
                        "tls_key": ""})  # fmt: skip
     assert r.status_code == 400 and "Only identity = &quot;lan&quot;" in r.text
     assert logged.path.read_bytes() == before
+    r = logged.submit("/admin/server", "/admin/server",
+                      {"bind": "127.0.0.1", "port": "8765", "hosts": "localhost:8765",
+                       "identity": "none", "redirect_port": "8080"})  # fmt: skip
+    assert r.status_code == 400 and "redirect_port needs identity" in r.text
+    assert logged.path.read_bytes() == before
 
 
 def test_unknown_form_fields_are_refused(logged: Admin) -> None:
     r = logged.submit("/admin/defaults", "/admin/defaults", {"walls": "3", "evil": "1"})
     assert r.status_code == 400
+
+
+DEFAULTS_FORM = {"walls": "2", "infill": "15", "supports": "off", "top_layers": "5",
+                 "bottom_layers": "3", "copies": "1", "bed_type": ""}  # fmt: skip
+
+
+def _wait_box(html: str) -> str:
+    m = re.search(r'<input type="checkbox" name="wait_for_start"[^>]*>', html)
+    assert m, html
+    return m.group(0)
+
+
+def test_defaults_wait_for_start_shown_and_saved(logged: Admin) -> None:
+    page = logged.get("/admin/defaults").text
+    assert "Wait for Start by default" in page and "every target" in page
+    assert "checked" not in _wait_box(page)
+    r = logged.submit("/admin/defaults", "/admin/defaults",
+                      {**DEFAULTS_FORM, "wait_for_start": "on"})  # fmt: skip
+    assert r.status_code == 303
+    assert "wait_for_start = true" in logged.path.read_text()
+    assert logged.svc.cfg.default_wait_for_start is True  # reloaded
+    assert " checked" in _wait_box(logged.get("/admin/defaults").text)
+    r = logged.submit("/admin/defaults", "/admin/defaults", DEFAULTS_FORM)  # unticked
+    assert r.status_code == 303
+    assert logged.svc.cfg.default_wait_for_start is False
+    assert "checked" not in _wait_box(logged.get("/admin/defaults").text)
+
+
+def test_defaults_bad_wait_for_start_is_refused(logged: Admin) -> None:
+    before = logged.path.read_bytes()
+    r = logged.submit("/admin/defaults", "/admin/defaults",
+                      {**DEFAULTS_FORM, "wait_for_start": "yes"})  # fmt: skip
+    assert r.status_code == 400 and "Invalid Wait for Start choice" in r.text
+    assert logged.path.read_bytes() == before
 
 
 def test_secrets_are_never_rendered_or_written(tmp_path: Path, monkeypatch) -> None:
@@ -698,3 +737,62 @@ def test_reload_closes_the_replaced_modules_unless_a_job_runs(adm: Admin) -> Non
     adm.svc.reload()
     release.set()
     assert closed == ["a"]  # a job may still use them; left for the collector
+
+
+def test_onshape_panel_page_sets_links_and_extra_settings(logged: Admin) -> None:
+    page = logged.get("/admin/panel").text
+    assert 'name="local_slicer"' in page and 'name="extra_chamber_temperature"' in page
+    # Only browser sessions that are set up can be chosen; the rest are named as missing.
+    web = re.search(r'<select name="web_slicer">(.*?)</select>', page).group(1)
+    assert 'value="orcaslicer"' not in web and "Not set up here:" in page
+    form = {"local_slicer": "orcaslicer", "web_slicer": "none",
+            "extra_chamber_temperature": "on", "extra_layer_height": "on"}  # fmt: skip
+    r = logged.submit("/admin/panel", "/admin/panel", form)
+    assert r.status_code == 303, r.text
+    saved = tomllib.loads(logged.path.read_text())
+    assert saved["panel"] == {
+        "local_slicer": "orcaslicer",
+        "web_slicer": "none",
+        "extra_settings": ["chamber_temperature", "layer_height"],
+    }
+    # The running service has them at once.
+    cfg = logged.svc.cfg
+    assert cfg.panel_extras == ("chamber_temperature", "layer_height")
+    assert cfg.panel_local_slicer == "orcaslicer" and cfg.panel_web_slicers == ()
+    links = server._studio_links(cfg)
+    assert links == (
+        '<p class="links">Open in OrcaSlicer: <a id="studio-link" class="off" href="#" '
+        'data-scheme="orcaslicer">on this computer</a></p>'
+    )
+    fields = server._extra_fields(cfg)
+    assert 'name="x_chamber_temperature" min="0" max="100" step="1"' in fields
+    assert 'placeholder="From the profile"' in fields
+    # A browser slicer that isn't set up is refused, and nothing is written.
+    before = logged.path.read_bytes()
+    r = logged.submit(
+        "/admin/panel", "/admin/panel", {"local_slicer": "none", "web_slicer": "orcaslicer"}
+    )
+    assert r.status_code == 400 and "needs a [web_orca] table" in r.text
+    assert logged.path.read_bytes() == before
+    # No local slicer and no extras: no links, no fields.
+    r = logged.submit("/admin/panel", "/admin/panel", {"local_slicer": "none", "web_slicer": ""})
+    assert r.status_code == 303
+    assert tomllib.loads(logged.path.read_text())["panel"] == {"local_slicer": "none"}
+    assert server._studio_links(logged.svc.cfg) == "" and server._extra_fields(logged.svc.cfg) == ""
+
+
+@pytest.mark.parametrize(
+    ("value", "shown", "hidden"),
+    [
+        ("docker", "Running in Docker", "Home Assistant"),
+        ("home-assistant", "Running as the Home Assistant add-on", "Running in Docker"),
+        ("", "", '<div class="msg">Running'),
+    ],
+)
+def test_runtime_note(
+    logged: Admin, monkeypatch: pytest.MonkeyPatch, value: str, shown: str, hidden: str
+) -> None:
+    monkeypatch.setenv("OS2SLICE_ADDON", "1" if value else "")
+    monkeypatch.setenv("OS2SLICE_RUNTIME", value)
+    page = logged.get("/admin").text
+    assert shown in page and hidden not in page

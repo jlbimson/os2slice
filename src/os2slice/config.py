@@ -11,6 +11,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, cast
 
+from os2slice import extra_settings
 from os2slice.bambuddy import PresetChoice
 from os2slice.errors import BadRequest, ConfigError
 from os2slice.modules.base import ModelDefaults, ModuleSpec, Profiles
@@ -32,9 +33,13 @@ FIX = "Edit {path}"
 # [printers.<key>]: BamBuddy printer names ("A1 Mini", "X1C_01") are keys too, so spaces
 # are allowed; "/" (discovered keys, "<target>/<id>") and "|" (form values) are not.
 PRINTER_KEY_RE = re.compile(r"[A-Za-z0-9_.()+-][A-Za-z0-9 _.()+-]{0,63}")
+# The panel's "Open in …" links: a slicer on the user's own computer (its URL handler), and
+# the shared browser session of each, configured by its table.
+DESKTOP_SLICERS = {"bambu-studio": "Bambu Studio", "orcaslicer": "OrcaSlicer"}
+WEB_SLICER_TABLES = {"bambu-studio": "web_studio", "orcaslicer": "web_orca"}
 TOP_LEVEL = {
     "onshape", "server", "export", "slicers", "targets", "printers", "default_printer",
-    "bambuddy", "print_defaults", "web_studio",
+    "bambuddy", "print_defaults", "web_studio", "web_orca", "panel",
 }  # fmt: skip
 
 
@@ -92,8 +97,16 @@ class Config:
     default_printer: str = ""  # a printer key or name
     print_defaults: PrintSettings = field(default_factory=PrintSettings)
     default_bed_type: str | None = None  # [print_defaults] bed_type
+    # [print_defaults] wait_for_start: the Wait for Start box's initial state (D-33)
+    default_wait_for_start: bool = False
     server: ServerConfig = field(default_factory=lambda: ServerConfig())
     web_studio: WebStudioConfig | None = None
+    web_orca: WebStudioConfig | None = None  # the same for the web OrcaSlicer (orca-web)
+    panel_extras: tuple[str, ...] = ()  # [panel] extra_settings: extra_settings.CATALOG keys
+    # [panel] local_slicer: the "on this computer" link's app ("" = no link), and
+    # web_slicer: the browser sessions the panel offers (DESKTOP_SLICERS names).
+    panel_local_slicer: str = "bambu-studio"
+    panel_web_slicers: tuple[str, ...] = ()
     # [onshape] auth: "keys" = one shared API key pair; "oauth" = each user signs in (D-23)
     onshape_auth: str = "keys"
     oauth_client_id: str = ""
@@ -107,7 +120,8 @@ class Config:
 
 @dataclass(frozen=True)
 class WebStudioConfig:
-    """The shared Bambu Studio browser session (bambustudio_web add-on, D-21)."""
+    """A shared slicer session in the browser: Bambu Studio (bambustudio_web add-on, D-21)
+    or OrcaSlicer (orcaslicer_web)."""
 
     url: str  # what browsers open, e.g. https://print.example.duckdns.org:3001
     inbox: Path  # where os2slice drops 3MF files for it to open
@@ -125,6 +139,7 @@ class ServerConfig:
     allowed_users: tuple[str, ...] = ()  # Tailscale logins, when identity = "tailscale"
     tls_cert: Path | None = None  # PEM chain; required for "lan"
     tls_key: Path | None = None
+    redirect_port: int = 0  # plain-HTTP listener that only 303s to https://hosts[0]/admin; 0 = off
 
 
 @dataclass(frozen=True)
@@ -134,7 +149,7 @@ class BambuddyConfig:
     base_url: str
     folder: str
     default_printer: str
-    manual_start: bool
+    manual_start: bool  # deprecated, no effect (D-33); still accepted
     presets: dict[str, PresetChoice]  # keyed by BamBuddy printer model, e.g. "A1 Mini"
     public_url: str = ""  # BamBuddy's UI as browsers reach it (default: this host, port 8000)
 
@@ -207,8 +222,9 @@ def parse(data: dict[str, Any], path: Path) -> Config:
     check_keys(
         "server",
         server,
-        {"port", "bind", "hosts", "identity", "allowed_users", "tls_cert", "tls_key"},
-    )
+        {"port", "bind", "hosts", "identity", "allowed_users", "tls_cert", "tls_key",
+         "redirect_port"},
+    )  # fmt: skip
     port = server.get("port", 8765)
     if not isinstance(port, int) or isinstance(port, bool) or not 1024 <= port <= 65535:
         raise fail("server.port must be an integer from 1024 to 65535")
@@ -244,9 +260,21 @@ def parse(data: dict[str, Any], path: Path) -> Config:
             raise fail('identity = "lan" needs server.tls_cert and server.tls_key (HTTPS)')
         if "hosts" not in server:
             raise fail('identity = "lan" needs server.hosts, e.g. ["<name>.duckdns.org:8443"]')
+    redirect_port = server.get("redirect_port", 0)
+    if (
+        not isinstance(redirect_port, int)
+        or isinstance(redirect_port, bool)
+        or not 0 <= redirect_port <= 65535
+    ):
+        raise fail("server.redirect_port must be an integer from 1 to 65535, or 0 for off")
+    if redirect_port and redirect_port == port:
+        raise fail("server.redirect_port must differ from server.port (or be 0 for off)")
+    if redirect_port and identity != "lan":
+        raise fail('server.redirect_port needs identity = "lan" (or set it to 0 for off)')
     server_cfg = ServerConfig(
-        bind, port, tuple(map(str, hosts)), identity, tuple(users), tls_cert, tls_key
-    )
+        bind, port, tuple(map(str, hosts)), identity, tuple(users), tls_cert, tls_key,
+        redirect_port,
+    )  # fmt: skip
 
     export = table("export")
     check_keys("export", export, {"dir", "format", "units", "keep_days"})
@@ -324,26 +352,65 @@ def parse(data: dict[str, Any], path: Path) -> Config:
             "brim",
             "copies",
             "bed_type",
+            "wait_for_start",
         },
     )
+    default_wait_for_start = pd.get("wait_for_start", False)
+    if not isinstance(default_wait_for_start, bool):
+        raise fail("print_defaults.wait_for_start must be true or false")
     try:
-        print_defaults = PrintSettings(**{k: pd[k] for k in pd if k != "bed_type"})
+        not_settings = ("bed_type", "wait_for_start")
+        print_defaults = PrintSettings(**{k: pd[k] for k in pd if k not in not_settings})
         default_bed_type = check_bed_type(pd.get("bed_type"))
     except BadRequest as e:
         raise fail(f"[print_defaults]: {e.message}") from e
 
-    web_studio = None
-    ws = table("web_studio")
-    if ws:
-        check_keys("web_studio", ws, {"url", "inbox", "status"})
+    def web_app(name: str, port: int, inbox: str, status: str) -> WebStudioConfig | None:
+        ws = table(name)
+        if not ws:
+            return None
+        check_keys(name, ws, {"url", "inbox", "status"})
         url = str(ws.get("url", "")).rstrip("/")
         if not re.fullmatch(r"https://[A-Za-z0-9.-]+(:[0-9]{1,5})?", url):
-            raise fail("web_studio.url must look like https://host:3001")
-        inbox = Path(str(ws.get("inbox", "/share/os2slice/inbox"))).expanduser()
-        status = Path(str(ws.get("status", "/share/os2slice/web-studio.json"))).expanduser()
-        if not (inbox.is_absolute() and status.is_absolute()):
-            raise fail("web_studio.inbox and .status must be absolute paths")
-        web_studio = WebStudioConfig(url, inbox, status)
+            raise fail(f"{name}.url must look like https://host:{port}")
+        inbox_path = Path(str(ws.get("inbox", inbox))).expanduser()
+        status_path = Path(str(ws.get("status", status))).expanduser()
+        if not (inbox_path.is_absolute() and status_path.is_absolute()):
+            raise fail(f"{name}.inbox and .status must be absolute paths")
+        return WebStudioConfig(url, inbox_path, status_path)
+
+    web_studio = web_app(
+        "web_studio", 3001, "/share/os2slice/inbox", "/share/os2slice/web-studio.json"
+    )
+    web_orca = web_app(
+        "web_orca", 3444, "/share/os2slice/orca-inbox", "/share/os2slice/web-orca.json"
+    )
+
+    panel = table("panel")
+    check_keys("panel", panel, {"extra_settings", "local_slicer", "web_slicer"})
+    wanted = panel.get("extra_settings", [])
+    if not (isinstance(wanted, list) and all(isinstance(k, str) for k in wanted)):
+        raise fail("panel.extra_settings must be a list of setting names")
+    try:
+        panel_extras = extra_settings.check_keys(wanted)
+    except BadRequest as e:
+        raise fail(f"panel.extra_settings: {e.message}. {e.fix}") from e
+    names = ", ".join(f'"{n}"' for n in (*DESKTOP_SLICERS, "none"))
+    local = panel.get("local_slicer", "bambu-studio")
+    if local not in (*DESKTOP_SLICERS, "none"):
+        raise fail(f"panel.local_slicer must be one of {names}")
+    configured_web = {"bambu-studio": web_studio, "orcaslicer": web_orca}
+    web = panel.get("web_slicer")
+    if web is None:  # every browser session that is set up
+        web_slicers = tuple(n for n, ws in configured_web.items() if ws is not None)
+    elif web == "none":
+        web_slicers = ()
+    elif web in DESKTOP_SLICERS:
+        if configured_web[web] is None:
+            raise fail(f'panel.web_slicer = "{web}" needs a [{WEB_SLICER_TABLES[web]}] table')
+        web_slicers = (web,)
+    else:
+        raise fail(f"panel.web_slicer must be one of {names}")
 
     return Config(
         path=path,
@@ -360,8 +427,13 @@ def parse(data: dict[str, Any], path: Path) -> Config:
         default_printer=default_printer,
         print_defaults=print_defaults,
         default_bed_type=default_bed_type,
+        default_wait_for_start=default_wait_for_start,
         server=server_cfg,
         web_studio=web_studio,
+        web_orca=web_orca,
+        panel_extras=panel_extras,
+        panel_local_slicer="" if local == "none" else local,
+        panel_web_slicers=web_slicers,
         onshape_auth=onshape_auth,
         oauth_client_id=oauth_client_id,
         oauth_base_url=oauth_base_url,
@@ -394,7 +466,7 @@ def _parse_bambuddy(data: dict[str, Any], fail: Any) -> BambuddyConfig:
     default_printer = bb.get("default_printer", "")
     if not isinstance(default_printer, str):
         raise fail("bambuddy.default_printer must be a printer name")
-    manual_start = bb.get("manual_start", True)
+    manual_start = bb.get("manual_start", False)
     if not isinstance(manual_start, bool):
         raise fail("bambuddy.manual_start must be true or false")
     presets: dict[str, PresetChoice] = {}

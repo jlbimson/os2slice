@@ -60,3 +60,33 @@ def test_copies_are_instances_of_one_object() -> None:
 def test_one_copy_by_default() -> None:
     model = zipfile.ZipFile(io.BytesIO(build_3mf([Part("A", triangle_stl(), 1)], "Obj")))
     assert 'transform="1 0 0 0 1 0 0 0 1 0 0 0"' in model.read("3D/3dmodel.model").decode()
+
+
+def test_project_settings_from_orcaslicer_keep_its_tag() -> None:
+    import io
+    import json
+    import zipfile
+
+    from os2slice.threemf import orca_version_of, with_project_settings
+
+    def model_3mf(metadata: str) -> bytes:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr(
+                "3D/3dmodel.model",
+                '<model><metadata name="Application">os2slice</metadata>' + metadata + "</model>",
+            )
+        return buf.getvalue()
+
+    sliced = model_3mf(
+        '<metadata name="Application">BambuStudio-02.03.01.51</metadata>\n'
+        ' <metadata name="OrcaSlicer">2.4.2</metadata>'
+    )
+    assert orca_version_of(sliced) == "2.4.2"
+    assert orca_version_of(model_3mf("")) is None and orca_version_of(b"not a zip") is None
+    settings = json.dumps({"version": "02.03.01.51"}).encode()
+    for orca, expected in (("2.4.2", True), (None, False)):
+        out = with_project_settings(model_3mf(""), settings, orca)
+        model = zipfile.ZipFile(io.BytesIO(out)).read("3D/3dmodel.model").decode()
+        assert '<metadata name="Application">BambuStudio-02.03.01.51</metadata>' in model
+        assert ('<metadata name="OrcaSlicer">2.4.2</metadata>' in model) is expected

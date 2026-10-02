@@ -5,6 +5,8 @@ base_url = "https://cad.onshape.com"   # must be https://*.onshape.com
 
 [server]
 port = 8765            # the Onshape extension Action URLs must use the same port
+# redirect_port = 8080  # identity = "lan" only: plain HTTP that just redirects to
+                        # https://<first of hosts>/admin (Home Assistant's Open Web UI)
 
 [export]
 dir = "~/OnshapeExports"
@@ -48,7 +50,7 @@ argv = ["flatpak", "run", "--file-forwarding", "com.prusa3d.PrusaSlicer", "--sin
 base_url = "http://homeassistant:8000"   # on the NUC itself: http://127.0.0.1:8000
 folder = "Onshape"                       # library folder; one subfolder per document
 default_printer = "A1 Mini"              # BamBuddy printer name
-manual_start = true                      # queue items wait for Start in BamBuddy (D-13)
+manual_start = false                     # deprecated, no effect: Wait for Start is per print
 
 # Slicer presets per BamBuddy printer *model* (GET /api/v1/slicer/presets lists names).
 [bambuddy.presets."A1 Mini"]
@@ -77,6 +79,7 @@ bottom_layers = 3        # solid bottom layers
 brim = false             # true: outer brim; false: no brim
 copies = 1               # copies of the selection on one plate (1-25)
 bed_type = "High Temp Plate"   # smooth PEI; per-model [bambuddy.presets.*] bed_type wins
+# wait_for_start = false  # true: the Wait for Start box starts ticked (every target; /admin)
 
 # ---- More modules (commented examples; docs/MODULES.md) ----
 #
@@ -113,7 +116,6 @@ bed_type = "High Temp Plate"   # smooth PEI; per-model [bambuddy.presets.*] bed_
 # kind = "bambuddy"
 # url = "http://homeassistant:8000"
 # folder = "Onshape"
-# manual_start = true
 # # api key: secret store entry "targets.bambuddy.api_key"
 #
 # [targets.bambuddy.models."A1 Mini"]   # defaults for discovered printers of this model

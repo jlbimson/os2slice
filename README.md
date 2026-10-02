@@ -7,7 +7,8 @@ Print Onshape parts from inside Onshape. os2slice sits between Onshape and your 
 - Slicing in BamBuddy, or in a **Bambu Studio** or **OrcaSlicer** API sidecar.
 - A web config page, `/admin`, for printers, slicers, secrets and settings.
 - A live 3D preview of the part as it will sit on the plate.
-- **Open in Bambu Studio**: in a shared Bambu Studio served in the browser, or in your own, with the printer and filament profiles already set.
+- **Open in Bambu Studio** or **OrcaSlicer**: in a shared slicer served in the browser (or Bambu Studio on your own computer), with the printer and filament profiles already set.
+- Your own OrcaSlicer process and filament profiles in the panel, and extra settings (chamber temperature, layer height, …) chosen on `/admin`.
 - Each user signs in with their own Onshape account (read-only), so no documents need sharing.
 
 It runs on a machine on the printers' LAN, either with **Docker Compose** or as a **Home Assistant** add-on, and serves that LAN only.
@@ -116,7 +117,7 @@ The install options above set up one BamBuddy that slices and queues. Everything
 The page is off until an admin password is set on the server, never from a browser:
 
 - Home Assistant: the `admin_password` option, then restart the add-on.
-- Docker: `docker compose exec os2slice os2slice admin-password`. With the shipped compose file `config.toml` is read-only, so the page can't save config there; see [`docs/DOCKER.md`](docs/DOCKER.md).
+- Docker: `docker compose exec os2slice os2slice admin-password`.
 - A desktop install: `os2slice admin-password`.
 
 The same settings live in `config.toml`; [`os2slice.example.toml`](os2slice.example.toml) has commented examples of every table, and `os2slice setup-keys --secret <section>.<key>.<field>` stores a module secret from a terminal.
@@ -126,6 +127,7 @@ The same settings live in `config.toml`; [`os2slice.example.toml`](os2slice.exam
 ```bash
 uv tool install -e .          # or: pipx install -e .
 uv run pytest -q              # unit tests (Onshape and BamBuddy are faked)
+(cd tests/js && npm ci)       # optional: Node + jsdom, for the panel script's test
 uv run ruff check . && uv run ruff format --check .
 os2slice doctor
 ```
@@ -141,7 +143,7 @@ Design notes:
 ## Security
 
 - os2slice only **reads** from Onshape. On slicers and targets it only uploads its own files, slices and queues; it never deletes or edits anything else there. Modules call only the URLs in the config.
-- A print needs a button press on os2slice's own page (same-origin POST, single-use token); jobs wait for a person to start them.
+- A print needs a button press on os2slice's own page (same-origin POST, single-use token), or a `[y/N]` in the CLI; the job starts by itself once the printer is free, unless the person printing ticks **Wait for Start** (CLI: `--wait-for-start`); then it waits until someone presses Start. This holds for every target (BamBuddy, Moonraker, PrusaLink). Whether the box starts ticked is a print default on `/admin` (`[print_defaults] wait_for_start`, off unless set; the CLI follows it, and `--no-wait-for-start` overrides it).
 - The config page `/admin` needs an admin password set on the server (scrypt hash; login rate-limited), and every change is a same-origin POST with a single-use token. Secrets are write-only there: pages show "set" or "not set", never the value, and they never go into `config.toml`.
 - Sign-in tokens and secrets stay on the server, in files only the service can read (or the system keyring on a desktop).
 - It serves HTTPS on the LAN only, and accepts requests only for the configured host names.

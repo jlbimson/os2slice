@@ -4,6 +4,8 @@
 #   cp docker/env.example .env && chmod 600 .env       # then fill in the secrets
 #   docker compose up -d --build                       # os2slice only
 #   docker compose --profile web-studio --profile duckdns up -d --build   # everything
+#   docker compose --profile orca up -d --build        # os2slice + an OrcaSlicer sidecar
+#   docker compose --profile orca --profile orca-web up -d --build   # + OrcaSlicer in a browser
 #
 # BamBuddy runs separately (its own compose file, host networking); these services reach
 # it on the Docker host as host.docker.internal.
@@ -16,10 +18,12 @@ services:
       - "8443:8443"
     env_file: .env  # ONSHAPE_OAUTH_CLIENT_SECRET, BAMBUDDY_API_KEY, ...
     volumes:
-      - ./docker/config.toml:/data/os2slice/config.toml:ro
+      - ./docker/config.toml:/data/os2slice/config.toml  # /admin saves it (in place)
       - ./certs:/certs:ro
       - os2slice-data:/data/state  # sign-ins, log
       - shared:/share/os2slice  # hands parts to the web Bambu Studio
+      - ./orca-profiles:/orca-profiles:ro  # slicer user profiles, for a sidecar's profile_dir
+      - orca-web-config:/orca-web:ro  # the web OrcaSlicer's settings and profiles (orca-web)
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
@@ -49,6 +53,43 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+  # OrcaSlicer as a REST service (optional), for a [slicers.<key>] with
+  # kind = "orca-slicer-api" and url = "http://orca-slicer-api:3000". It publishes no
+  # port: only os2slice, on this compose network, can reach it.
+  orca-slicer-api:
+    profiles: ["orca"]
+    image: ghcr.io/maziggy/orca-slicer-api:${ORCA_API_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      # The OrcaSlicer vendor folder (resources/profiles/<vendor>) that the system
+      # presets your profiles inherit from live in: BBL, Ratrig, Voron, Prusa, ...
+      BUNDLED_PROFILES_PATH: /app/squashfs-root/resources/profiles/${ORCA_VENDOR:-BBL}
+    volumes:
+      - orca-data:/app/data  # its /health reports unhealthy without a writable DATA_PATH
+
+  # OrcaSlicer's desktop app in a browser tab (optional, https://<host>:3444). Sign in to
+  # your Orca account and edit your profiles there; os2slice slices with them (a sidecar
+  # with profile_dir = "/orca-web/.config/OrcaSlicer"), from the next print on. With
+  # [web_orca] in config.toml, the panel's "Open in OrcaSlicer" sends parts to it.
+  orca-web:
+    profiles: ["orca-web"]
+    build:
+      context: addon
+      dockerfile: orcaslicer_web/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3444:3001"
+    environment:
+      PUID: "1000"  # the os2slice user, which reads the profiles
+      PGID: "1000"
+      TZ: ${TZ:-Etc/UTC}
+      CUSTOM_USER: orca
+      PASSWORD: ${WEB_ORCA_PASSWORD:-}  # basic auth; set it, the app has your Orca login
+    shm_size: "1gb"
+    volumes:
+      - orca-web-config:/config
+      - shared:/share/os2slice  # os2slice's inbox for it, and its status file
+
   # Points <name>.duckdns.org at this machine's LAN address and keeps the HTTPS
   # certificate in ./certs (optional; skip it if you bring your own certificate).
   duckdns:
@@ -67,3 +108,5 @@ volumes:
   bambustudio-config:
   shared:
   lego-data:
+  orca-data:
+  orca-web-config:

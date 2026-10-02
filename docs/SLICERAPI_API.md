@@ -41,6 +41,62 @@ category") ✅. The HA add-on and BamBuddy's compose are both the resolver flavo
 | `GET /slice-async/{id}/result` | ✅ the file, with the metadata headers | 📖 same |
 | `DELETE /slice-async/{id}` | 📖 204; 400 while running. Jobs are kept in memory for `ASYNC_SLICE_RETENTION_MS` (1 h) otherwise | 📖 same |
 
+## User profiles and `BUNDLED_PROFILES_PATH` (resolver)
+
+✅ 2026-10-01, `ghcr.io/maziggy/orca-slicer-api:latest` (OrcaSlicer 2.4.2) on joshprint, with
+OrcaSlicer GUI user profiles (machine inherits `RatRig V-Core 3 300 0.4 nozzle`):
+
+- The resolver looks up `inherits` parents in **one** folder only, `BUNDLED_PROFILES_PATH`,
+  default `<ORCASLICER_PATH dir>/resources/profiles/BBL`. A parent not found there ends the
+  walk **silently**, so a RatRig profile sliced with the CLI's defaults for everything it
+  didn't set itself (filament at 200 °C instead of 260 °C, density 0). With
+  `BUNDLED_PROFILES_PATH=/app/squashfs-root/resources/profiles/Ratrig`, 608 of the 636
+  `; key = value` settings in the G-code matched a file the GUI sliced with the same
+  profiles; the rest were metadata (`inherits_group`, `different_settings_to_system`,
+  print host fields, colours, prime tower position).
+- A user printer whose process or filament inherits a system preset is refused with "The
+  selected printer is not compatible with the process preset in the 3mf" (exit 239): the
+  system preset's `compatible_printers` lists system printers only, matched by name.
+  `compatible_printers: []` doesn't help (the resolver strips empty values and the parent's
+  list comes back); `compatible_printers: ["<user printer name>"]` does.
+- `GET /profiles/bundled` lists the `BUNDLED_PROFILES_PATH` folder: 60 printers for BBL,
+  88 RatRig ones with the Ratrig folder.
+
+os2slice therefore resolves user profiles itself when `profile_dir` holds OrcaSlicer's
+`system/` folder (orca_profiles.py), and uploads them with no `inherits`:
+
+- ✅ Sirayatech PET-CF (a bundle filament inheriting "Generic ASA @System" from the Orca
+  Filament Library) and BL ASA-CF (RatRig) sliced to the same filament settings as the
+  GUI; every remaining difference was process values that had changed since, or metadata.
+- ✅ Bundle profiles are `"from": "Bundle"`, which the CLI refuses ("from Bundle
+  unsupported", exit 251): a resolved profile goes up as `"from": "system"`.
+- ✅ Legacy keys: the library's `fdm_filament_common` still says `chamber_temperatures`,
+  which the GUI renames to `chamber_temperature` per file before merging. Merged into one
+  file, the CLI renamed it last and the base's 0 beat the user's 50. The plain renames of
+  `PrintConfigDef::handle_legacy` (2.4.2) are applied per file before merging.
+
+- ✅ Incomplete vendor bases: RatRig's `fdm_filament_common` has 49 keys, the Orca Filament
+  Library's 65. Two RatRig filaments together were refused ("The input preset file is
+  invalid", exit 251; the CLI's log: "filament_is_support's count 1 not equal to
+  filament_colour's size 2"), each alone was fine. The GUI fills such gaps from its
+  built-in defaults; os2slice fills them from the library's `fdm_filament_common`.
+- ✅ Mixed temperatures: PM ASA (260 °C) with a PETG (range up to 250 °C) is refused, exit 194
+  ("Selected nozzle temperatures are incompatible"), as the GUI does unless "Remove mixed
+  temperature restriction" is on; the sidecar has no switch for it. The job fails with that
+  text.
+
+## Multi-filament: every filament needs a colour
+
+✅ 2026-10-01, OrcaSlicer 2.4.2 CLI, single-nozzle MMU printer (`single_extruder_multi_material`):
+a 3MF with two filaments, uploaded without `filament_colour`, crashed the CLI (SIGSEGV in
+`calc_filament_change_info_by_toolorder`, under `ToolOrdering::reorder_extruders_for_minimum_flush_volume`).
+The flush matrix is sized by the number of filament colours (`filament_colour`), so with
+one colour for two filaments it reads out of bounds. A GUI-saved MMU project sliced fine
+(its project settings list a colour per filament), and so did the same upload with a
+colour on each filament (101 tool changes, purge volumes computed from the colours). The
+module sends one per filament on a multi-filament print: the material's, the profile's
+own, or a stand-in.
+
 ## `POST /slice` and `/slice-async` form
 
 Multipart, all text fields are strings.

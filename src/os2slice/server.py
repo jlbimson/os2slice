@@ -33,10 +33,10 @@ from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import httpx
 
-from os2slice import __version__, admin, files, printing
+from os2slice import __version__, admin, extra_settings, files, printing
 from os2slice.adminauth import AdminStore, admin_path
 from os2slice.auth import get_secret
-from os2slice.config import Config, WebStudioConfig
+from os2slice.config import DESKTOP_SLICERS, Config, WebStudioConfig
 from os2slice.config import load as load_config
 from os2slice.errors import AuthError, BadRequest, ConfigError, Os2sliceError
 from os2slice.jobs import CsrfTokens, Job, JobStore
@@ -56,6 +56,7 @@ from os2slice.oauth import (
 from os2slice.oauth import static_bearer as oauth_static_bearer
 from os2slice.onshape import OnshapeClient
 from os2slice.orientation import FACE_ID_RE, Orientation
+from os2slice.redirect import make_redirect_server
 from os2slice.request import PART_ID_RE, ExportRequest, parse_print_query
 from os2slice.settings import (
     COPIES_RANGE,
@@ -77,6 +78,9 @@ FORM_FIELDS = frozenset(
         "claim",  # /auth/claim (D-23)
         "printer",
         "filament",  # the panel's own filament menu: a Material.id, "" = preset
+        "filament_tool",  # its "Load into" menu: the changer tool for a filament not loaded
+        "process",  # the panel's process menu: one of the user's own profiles, "" = preset
+        "machine",  # the panel's printer profile menu: the same, for printer profiles
         "orient",
         "walls",
         "infill",
@@ -89,6 +93,8 @@ FORM_FIELDS = frozenset(
         "face",
         "plate",
         "extra",
+        "manual_start",  # the Wait for Start checkbox: absent = start by itself, "on" = wait
+        *(f"x_{key}" for key in extra_settings.BY_KEY),  # extra settings (empty = profile's)
     }
 )
 CHECKBOXES = ("build_plate_only", "brim")  # an unchecked box isn't sent at all
@@ -96,6 +102,8 @@ CHECKBOXES = ("build_plate_only", "brim")  # an unchecked box isn't sent at all
 MATERIAL_ID = r"[A-Za-z0-9_.-]{1,40}"
 EXTRA_RE = re.compile(rf"([A-Za-z0-9_+\-]{{1,32}}):({MATERIAL_ID})")
 MAX_PRINTER_LEN = 100
+TOOL_ID_RE = re.compile(r"t\d{1,2}")  # a changer tool's Material.id (moonraker.py)
+MAX_PROFILE_LEN = 200  # a process profile name from the panel
 MAX_PARTS = 16
 ORIENT_CHOICES = [
     ("as-modeled", "As modeled (bottom face down)"),
@@ -131,10 +139,15 @@ MODEL_LINK_TTL = 900  # seconds a Bambu Studio download link stays valid
 KNOWN_PATHS = frozenset(
     {"/print", "/health", "/panel", "/panel/print", "/panel/preview", "/panel/model-link"}
     | {"/panel/web-studio", "/panel/web-studio/status"}
+    | {"/panel/web-orca", "/panel/web-orca/status", "/panel/face-part"}
     | {"/auth/start", "/auth/callback", "/auth/claim", "/auth/sign-out"}
     | {f"/static/{f}" for f in STATIC_FILES}
 )
 PREVIEW_FIELDS = frozenset({*REQUEST_FIELDS, "face", "orient", "extra", "only"})
+# The shared browser sessions a part can be sent to: route name -> (config field, label).
+WEB_APPS = {"web-studio": ("web_studio", "Bambu Studio"), "web-orca": ("web_orca", "OrcaSlicer")}
+WEB_STATUS_PATHS = {f"/panel/{app}/status": app for app in WEB_APPS}
+WEB_ROUTES = {"bambu-studio": "web-studio", "orcaslicer": "web-orca"}  # by slicer name
 DEFAULT_BED = (256, 256)  # the preview's bed when a printer doesn't say (PrinterInfo.bed_mm)
 JOB_PATH_RE = re.compile(r"/jobs/([A-Za-z0-9_-]{22})")
 
@@ -283,9 +296,8 @@ class Service:
             raise ConfigError("No printers are configured on the server", "Add a [targets.*] table")
 
     def start_note(self) -> str:
-        """Where queued prints wait: the targets that leave them for a person (D-13)."""
-        mods = self.modules
-        return " or ".join(t.spec.label for k, t in mods.targets.items() if mods.manual_start[k])
+        """Where queued prints wait for Start: every target's name (D-13)."""
+        return " or ".join(dict.fromkeys(t.spec.label for t in self.modules.targets.values()))
 
 
 def make_handler(service: Service) -> type[BaseHTTPRequestHandler]:
@@ -295,17 +307,33 @@ def make_handler(service: Service) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-def serve(service: Service) -> None:
+def serve(service: Service, redirect_port: int | None = None) -> None:
+    """Run the service. `redirect_port` overrides [server] redirect_port (the add-on
+    passes its own); like the config value it needs identity = "lan"."""
     httpd = make_server(service)
     s = service.cfg.server
+    if redirect_port is None:
+        redirect_port = s.redirect_port
+    elif s.identity != "lan" and redirect_port:
+        log.error('ignoring redirect port %s: it needs identity = "lan"', redirect_port)
+        redirect_port = 0
     scheme = "https" if s.tls_cert else "http"
     log.info("serving on %s://%s:%s (hosts %s, identity %s)", scheme, s.bind, s.port, s.hosts,
              s.identity)  # fmt: skip
     print(f"os2slice serving on {scheme}://{s.bind}:{s.port} for {', '.join(s.hosts)}")
+    redirect = None
+    if redirect_port:
+        target = f"https://{s.hosts[0]}/admin"
+        redirect = make_redirect_server(s.bind, redirect_port, target)
+        threading.Thread(target=redirect.serve_forever, daemon=True).start()
+        log.info("redirecting http://%s:%s to %s", s.bind, redirect_port, target)
     try:
         httpd.serve_forever()
     finally:
         httpd.server_close()
+        if redirect is not None:
+            redirect.shutdown()
+            redirect.server_close()
         service.modules.close()  # the current ones; reload() closed those it replaced
 
 
@@ -412,14 +440,16 @@ class _Handler(BaseHTTPRequestHandler):
                 self._get_panel(url.query, user)
             elif url.path == "/panel/print" and method == "POST":
                 self._post_print(user, panel=True)
-            elif url.path == "/panel/web-studio" and method == "POST":
-                self._post_web_studio()
-            elif url.path == "/panel/web-studio/status" and method == "GET":
-                self._get_web_studio_status()
+            elif url.path in ("/panel/web-studio", "/panel/web-orca") and method == "POST":
+                self._post_web_studio(url.path.removeprefix("/panel/"))
+            elif url.path in WEB_STATUS_PATHS and method == "GET":
+                self._get_web_studio_status(WEB_STATUS_PATHS[url.path])
             elif url.path == "/panel/model-link" and method == "POST":
                 self._post_model_link()
             elif (m := MODEL_PATH_RE.fullmatch(url.path)) and method == "GET":
                 self._get_model(m.group(1))
+            elif url.path == "/panel/face-part" and method == "GET":
+                self._get_face_part(url.query)
             elif url.path == "/panel/preview" and method == "GET":
                 self._get_preview(url.query)
             elif url.path.startswith("/static/") and method == "GET":
@@ -600,10 +630,11 @@ class _Handler(BaseHTTPRequestHandler):
     def _post_print(self, user: str, panel: bool) -> None:
         self._require_same_origin_post()
         form = self._read_form()
-        req, face, orientation, printer, material, extra = _selection(form, panel)
+        req, face, orientation, printer, material, extra, process, machine = _selection(form, panel)
         fields = {k: form[k] for k in REQUEST_FIELDS if k in form and form[k] != ""}
         settings = _form_settings(form, self.svc.cfg)
         plate = check_bed_type(form.get("plate"))
+        wait = _wait_for_start(form)
         # Redeem last, so a typo in a setting doesn't burn the form. The panel's token
         # is bound to the Part Studio (the part comes from the live selection).
         bound = _bind_element(req) if panel else _bind(req)
@@ -621,7 +652,7 @@ class _Handler(BaseHTTPRequestHandler):
                     job_req = replace(req, part_id=onshape.part_of_face(req, face))
                 plan = printing.plan_print(
                     job_req, cfg, onshape, mods, printer, orientation, settings, material, plate,
-                    extra,
+                    extra, process or None, machine or None, wait,
                 )  # fmt: skip
                 progress("Checked the part and the printer")
                 out = printing.execute_print(
@@ -693,7 +724,10 @@ class _Handler(BaseHTTPRequestHandler):
                 views.append(PrinterView(p, "", False, ()))
                 continue
             status = mods.target_for(p).status(p)
-            views.append(PrinterView(p, _state(status), True, printing.materials_of(p, status)))
+            own = mods.own_profiles(p)
+            materials = printing.materials_of(p, status, own, mods.pool_presets(p))
+            views.append(PrinterView(p, _state(status), True, materials, own.process,
+                                     own.printer, own.mmu_printers))  # fmt: skip
         return views
 
     # -- Open in Bambu Studio ------------------------------------------------
@@ -723,32 +757,34 @@ class _Handler(BaseHTTPRequestHandler):
         self, selection: Selection, settings: PrintSettings, plate: str | None, uid: str | None
     ) -> tuple[bytes, printing.PrintPlan]:
         """The selection as a Bambu Studio project, sliced (not queued) for its settings."""
-        req, face, orientation, printer, material, extra = selection
+        req, face, orientation, printer, material, extra, process, machine = selection
         cfg, mods = self.svc.cfg, self.svc.modules
         with self.svc.onshape_for(uid) as onshape:
             if req.part_id is None:
                 req = replace(req, part_id=onshape.part_of_face(req, face))
             plan = printing.plan_print(
-                req, cfg, onshape, mods, printer, orientation, settings, material, plate, extra
-            )
+                req, cfg, onshape, mods, printer, orientation, settings, material, plate, extra,
+                process or None, machine or None,
+            )  # fmt: skip
             return printing.studio_project(plan, cfg, onshape, mods), plan
 
-    def _web_studio(self) -> WebStudioConfig:
-        ws = self.svc.cfg.web_studio
+    def _web_studio(self, app: str) -> WebStudioConfig:
+        field, label = WEB_APPS[app]
+        ws: WebStudioConfig | None = getattr(self.svc.cfg, field)
         if ws is None:
-            raise ConfigError("The web Bambu Studio isn't set up", "Set web_studio_url (add-on)")
+            raise ConfigError(f"The web {label} isn't set up", f"Add [{field}] to the config")
         return ws
 
-    def _get_web_studio_status(self) -> None:
+    def _get_web_studio_status(self, app: str) -> None:
         if self.headers.get("Sec-Fetch-Site") != "same-origin":
             raise Forbidden("Only for the print panel")
-        ws = self._web_studio()
+        ws = self._web_studio(app)
         self._send(200, json.dumps(web_studio_status(ws)).encode(), "application/json")
 
-    def _post_web_studio(self) -> None:
+    def _post_web_studio(self, app: str) -> None:
         """Hand the selection's 3MF to the shared session; the tab opens client-side."""
         self._require_same_origin_post()
-        ws = self._web_studio()
+        ws = self._web_studio(app)
         form = self._read_form()
         selection = _selection(form, panel=True)
         data, plan = self._studio_project(selection, *self._studio_settings(form), self._uid())
@@ -758,7 +794,7 @@ class _Handler(BaseHTTPRequestHandler):
         tmp = ws.inbox / f".{name}.part"
         tmp.write_bytes(data)
         os.replace(tmp, ws.inbox / name)  # the watcher only picks up finished *.3mf
-        log.info("handed %s to the web Bambu Studio", name)
+        log.info("handed %s to the web %s", name, WEB_APPS[app][1])
         self._send(200, json.dumps({"url": ws.url, "file": name}).encode(), "application/json")
 
     def _get_model(self, token: str) -> None:
@@ -780,6 +816,32 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     # -- /panel/preview and /static ------------------------------------------
+
+    def _get_face_part(self, query: str) -> None:
+        """{"part": id, "name": name}: the part a face picked on its own belongs to, so the
+        panel can name it. Read-only; same-origin fetch only."""
+        if self.headers.get("Sec-Fetch-Site") != "same-origin":
+            raise Forbidden("Only for the print panel")
+        try:
+            pairs = parse_qsl(query, keep_blank_values=True, strict_parsing=True, max_num_fields=8)
+        except ValueError as e:
+            raise BadRequest("Malformed query string") from e
+        params: dict[str, str] = {}
+        for k, v in pairs:
+            if (k not in REQUEST_FIELDS and k != "face") or k in params:
+                raise BadRequest(f"Unexpected parameter {k[:30]!r}")
+            params[k] = v
+        face = params.get("face", "")
+        if not FACE_ID_RE.fullmatch(face):
+            raise BadRequest("Invalid face ID")
+        fields = {k: v for k, v in params.items() if k in REQUEST_FIELDS and v != ""}
+        req = parse_print_query(urlencode(fields))
+        with self._onshape() as onshape:
+            part = onshape.part_of_face(req, face)
+            names = {str(p.get("partId")): str(p.get("name")) for p in onshape.list_parts(req)}
+        body = {"part": part, "name": names.get(part, part)}
+        self._cache = "private, max-age=300"
+        self._send(200, json.dumps(body).encode(), "application/json")
 
     def _get_preview(self, query: str) -> None:
         """The part as STL in the chosen orientation. Read-only; same-origin fetch only."""
@@ -998,12 +1060,6 @@ def _print_form(
         if req.configuration
         else ""
     )
-    waits_in = svc.start_note()
-    start = (
-        f"waits in {waits_in}'s queue until you press Start"
-        if waits_in
-        else "starts as soon as the printer is free"
-    )
     return f"""
 <dl><dt>Part</dt><dd>{_e(part)}</dd><dt>Document</dt><dd>{_e(doc)}</dd>{config}</dl>
 <form method="post" action="/print">{hidden}
@@ -1011,9 +1067,30 @@ def _print_form(
 {_plate_select(cfg)}
 <label>Orientation <select name="orient">{_options(ORIENT_CHOICES, "as-modeled")}</select></label>
 {_settings_fields(cfg)}
-<p class="muted">The print {_e(start)}.</p>
+{_wait_field(svc)}
 <button type="submit">Slice and queue print</button>
 </form>"""
+
+
+def _wait_field(svc: Service) -> str:
+    """The Wait for Start checkbox (D-13: the person printing chooses). Its initial state
+    is `[print_defaults] wait_for_start` (default unchecked: prints start by themselves,
+    D-33); the person's tick wins. A target's `manual_start` config value is deprecated
+    and doesn't change it."""
+    where = svc.start_note() or "the queue"
+    checked = " checked" if svc.cfg.default_wait_for_start else ""
+    return (
+        f'<label class="check"><input type="checkbox" name="manual_start" value="on"{checked}>'
+        f" Wait for Start in {_e(where)} (don't start by itself)</label>"
+    )
+
+
+def _wait_for_start(form: dict[str, str]) -> bool:
+    """The Wait for Start checkbox: unchecked isn't sent at all."""
+    value = form.get("manual_start")
+    if value not in (None, "on"):
+        raise BadRequest("Invalid Wait for Start choice")
+    return value == "on"
 
 
 def _plate_select(cfg: Config) -> str:
@@ -1024,8 +1101,38 @@ def _plate_select(cfg: Config) -> str:
 
 
 def _form_settings(form: dict[str, str], cfg: Config) -> PrintSettings:
-    """Settings from one of our own forms, where a missing checkbox means unchecked."""
-    return PrintSettings.from_strings({c: "" for c in CHECKBOXES} | form, cfg.print_defaults)
+    """Settings from one of our own forms, where a missing checkbox means unchecked, with
+    the extra settings the config offers that were filled in."""
+    settings = PrintSettings.from_strings({c: "" for c in CHECKBOXES} | form, cfg.print_defaults)
+    extras = extra_settings.parse_form(form, cfg.panel_extras)
+    return replace(settings, extras=extras) if extras else settings
+
+
+def _extra_fields(cfg: Config) -> str:
+    """The panel's extra settings ([panel] extra_settings), each empty: the profile's own."""
+    fields = []
+    for key in cfg.panel_extras:
+        s = extra_settings.BY_KEY[key]
+        unit = f" ({s.unit})" if s.unit else ""
+        name = f"x_{key}"
+        if s.kind in ("bool", "choice"):
+            choices = s.choices if s.kind == "choice" else (("1", "On"), ("0", "Off"))
+            options = _options((("", "From the profile"), *choices), "")
+            control = f'<select name="{name}">{options}</select>'
+        else:
+            step = "1" if s.kind == "int" else "any"
+            lo, hi = extra_settings.number_text(s.lo), extra_settings.number_text(s.hi)
+            control = (
+                f'<input type="number" name="{name}" min="{lo}" max="{hi}" step="{step}" '
+                'placeholder="From the profile">'
+            )
+        title = f' title="{_e(s.help)}"' if s.help else ""
+        fields.append(f"<label{title}>{_e(s.label)}{_e(unit)} {control}</label>")
+    if not fields:
+        return ""
+    return (
+        '<details class="extras"><summary>More settings</summary>' + "".join(fields) + "</details>"
+    )
 
 
 def _settings_fields(cfg: Config) -> str:
@@ -1057,13 +1164,17 @@ class PrinterView:
     state: str
     configured: bool  # has a slicer and profiles (else it's only listed as unusable)
     materials: tuple[Material, ...]  # loaded (or configured) materials, with their profiles
+    processes: tuple[str, ...] = ()  # the user's own process profiles in its slicer
+    machines: tuple[str, ...] = ()  # ... and printer profiles
+    mmu_machines: tuple[str, ...] = ()  # the printer profiles that use a filament changer
 
     def matches(self, wanted: str) -> bool:
         return bool(wanted) and wanted in (self.printer.key, self.printer.name)
 
 
-# part request, face, orientation, printer key or name, material id, extra (part, material)
-Selection = tuple[ExportRequest, str, Orientation, str, str | None, list[tuple[str, str]]]
+# part request, face, orientation, printer key or name, material id, extra (part, material),
+# process profile and printer profile ("" = the printer's own)
+Selection = tuple[ExportRequest, str, Orientation, str, str | None, list[tuple[str, str]], str, str]
 
 
 def _selection(form: dict[str, str], panel: bool) -> Selection:
@@ -1084,11 +1195,18 @@ def _selection(form: dict[str, str], panel: bool) -> Selection:
         raise BadRequest("No part selected", "Right-click a part in the parts list")
     if panel and req.part_id is None and not face:
         raise BadRequest("Select a part, or the face it should stand on")
-    printer, material = _printer_choice(form.get("printer", ""), form.get("filament", ""))
+    printer, material = _printer_choice(
+        form.get("printer", ""), form.get("filament", ""), form.get("filament_tool", "")
+    )
     extra = _parse_extra(form.get("extra", "")) if panel else []
     if extra and req.part_id is None:
         raise BadRequest("Select the parts to print")
-    return req, face, orientation, printer, material, extra
+    process = form.get("process", "") if panel else ""
+    machine = form.get("machine", "") if panel else ""
+    for what, value in (("process", process), ("printer profile", machine)):
+        if len(value) > MAX_PROFILE_LEN or any(ord(c) < 32 for c in value):
+            raise BadRequest(f"Invalid {what} choice")
+    return req, face, orientation, printer, material, extra, process, machine
 
 
 def web_studio_status(ws: WebStudioConfig, now: float | None = None) -> dict[str, Any]:
@@ -1128,8 +1246,11 @@ def _split_printer(value: str) -> tuple[str, str | None]:
     return (m.group(1), m.group(2)) if m else (value, None)
 
 
-def _printer_choice(printer: str, filament: str) -> tuple[str, str | None]:
-    """The page's combined 'key|material' menu, or the panel's printer + filament menus."""
+def _printer_choice(printer: str, filament: str, tool: str = "") -> tuple[str, str | None]:
+    """The page's combined 'key|material' menu, or the panel's printer + filament menus.
+
+    `tool` is the panel's "Load into" menu: a changer tool for a filament that isn't
+    loaded (printing.SLOT_RE, "t2.f-…", or "t2.preset" for the preset filament)."""
     if len(printer) > MAX_PRINTER_LEN:
         raise BadRequest("Invalid printer choice")
     key, material = _split_printer(printer)
@@ -1137,24 +1258,39 @@ def _printer_choice(printer: str, filament: str) -> tuple[str, str | None]:
         if material is not None or not re.fullmatch(MATERIAL_ID, filament):
             raise BadRequest("Invalid filament choice")
         material = filament
+    if tool and not TOOL_ID_RE.fullmatch(material or ""):
+        if not TOOL_ID_RE.fullmatch(tool):
+            raise BadRequest("Invalid tool choice")
+        material = f"{tool}.{material or 'preset'}"
+        if not re.fullmatch(MATERIAL_ID, material):
+            raise BadRequest("Invalid filament choice")
     return key, material
 
 
 def _material_label(m: Material, printer: PrinterInfo) -> tuple[str, bool]:
-    """(menu label, disabled) for a loaded material."""
-    if printer.nozzle_count > 1 and m.extruder is None:
+    """(menu label, disabled) for a loaded material. A pool's materials have no nozzle
+    (BamBuddy picks the printer, and so the trays, at dispatch): they stay usable."""
+    if printer.nozzle_count > 1 and m.extruder is None and not printer.pool:
         return f"{m.label} (nozzle unknown)", True
+    if m.raw.get("empty"):
+        return m.label, True  # an empty changer gate: "T3: empty"
     if not m.profile:
         return f"{m.label} (no matching preset)", True
     return m.label, False
 
 
 def _default_choice(view: PrinterView) -> str:
-    """Prefer a loaded material of the configured kind, then a lone one, then the preset."""
+    """Prefer a loaded material of the configured kind, then a lone one, then the preset.
+    A pool's presets (not loaded anywhere) are never the default."""
     key = view.printer.key
-    usable = [m for m in view.materials if printing.usable(m, view.printer)]
+    usable = [
+        m for m in view.materials if printing.usable(m, view.printer) and not printing.is_preset(m)
+    ]
     if not usable or not view.configured:
         return key
+    for m in usable:
+        if m.profile == view.printer.profiles.filament:
+            return f"{key}|{m.id}"
     configured = view.printer.profiles.filament.upper()
     for m in usable:
         if m.kind and re.search(rf"\b{re.escape(m.kind.upper())}\b", configured):
@@ -1173,8 +1309,11 @@ def _printer_select(views: list[PrinterView], default_printer: str) -> str:
             continue
         name, key = v.printer.name, v.printer.key
         preset_label = v.printer.profiles.filament.split(" @")[0]
-        opts = [(key, f"{name} · preset filament ({preset_label})", "", False)]
-        for m in v.materials:
+        opts = []
+        for m in _menu_order(v):
+            if m is None:
+                opts.append((key, f"{name} · preset filament ({preset_label})", "", False))
+                continue
             label, disabled = _material_label(m, v.printer)
             opts.append((f"{key}|{m.id}", f"{name} · {label}", m.colour or "", disabled))
         html_opts = "".join(
@@ -1200,15 +1339,46 @@ def _printer_select(views: list[PrinterView], default_printer: str) -> str:
     )
 
 
+def _menu_order(v: PrinterView) -> list[Material | None]:
+    """A printer's filament menu in order; None is the configured preset filament.
+
+    A printer: the preset, then each material. A pool: the filaments loaded across its
+    printers, then every preset made for the model by name, the configured one (None)
+    in its place among them, or first when it isn't one of them.
+    """
+    if not v.printer.pool:
+        return [None, *v.materials]
+    loaded = [m for m in v.materials if not printing.is_preset(m)]
+    configured = v.printer.profiles.filament
+    presets: list[Material | None] = [
+        None if m.profile == configured else m for m in v.materials if printing.is_preset(m)
+    ]
+    if None not in presets:
+        presets.insert(0, None)
+    return [*loaded, *presets]
+
+
 def _filament_choices(v: PrinterView) -> list[dict[str, Any]]:
-    """The panel's filament menu for one printer: the preset filament, then each material."""
+    """The panel's filament menu for one printer (`_menu_order`)."""
     default = _split_printer(_default_choice(v))[1]
     preset_label = v.printer.profiles.filament.split(" @")[0]
-    out: list[dict[str, Any]] = [
-        {"value": "", "label": f"Preset filament ({preset_label})", "default": default is None}
-    ]
-    for m in v.materials:
+    out: list[dict[str, Any]] = []
+    for m in _menu_order(v):
+        if m is None:
+            out.append(
+                {
+                    "value": "",
+                    "label": f"Preset filament ({preset_label})",
+                    "default": default is None,
+                    "tool": False,
+                    "profile": v.printer.profiles.filament,
+                }
+            )
+            continue
         label, disabled = _material_label(m, v.printer)
+        tool = printing.is_tool(m)
+        if tool and m.profile and not m.raw.get("empty"):
+            label += f" → {m.profile}"  # the profile it was matched to
         out.append(
             {
                 "value": m.id,
@@ -1216,8 +1386,38 @@ def _filament_choices(v: PrinterView) -> list[dict[str, Any]]:
                 "color": m.colour or "",
                 "disabled": disabled,
                 "default": m.id == default and not disabled,
+                "tool": tool,  # panel.js shows tools only with a changer printer profile
+                "empty": bool(m.raw.get("empty")),  # an empty gate: where a new one goes
+                "profile": m.profile,
             }
         )
+    return out
+
+
+def _machine_choices(v: PrinterView) -> list[dict[str, Any]]:
+    """The panel's printer profile menu for one printer, like the process menu; each
+    entry says whether that profile uses the filament changer ("mmu")."""
+    if not v.machines:
+        return []
+    preset = v.printer.profiles.printer
+    mmu = set(v.mmu_machines)
+    out = [{"value": "", "label": preset, "default": True, "mmu": preset in mmu}]
+    out += [
+        {"value": n, "label": n, "default": False, "mmu": n in mmu}
+        for n in v.machines
+        if n != preset
+    ]
+    return out
+
+
+def _process_choices(v: PrinterView) -> list[dict[str, Any]]:
+    """The panel's process menu for one printer: its own process profiles, the configured
+    one preselected (value "" means "the configured one"). Empty: the menu stays hidden."""
+    if not v.processes:
+        return []
+    preset = v.printer.profiles.process
+    out = [{"value": "", "label": preset, "default": True}]
+    out += [{"value": n, "label": n, "default": False} for n in v.processes if n != preset]
     return out
 
 
@@ -1235,6 +1435,8 @@ def _panel_printer_selects(views: list[PrinterView], default_printer: str) -> st
         for v in usable
     )
     choices = {v.printer.key: _filament_choices(v) for v in usable}
+    processes = {v.printer.key: _process_choices(v) for v in usable}
+    machines = {v.printer.key: _machine_choices(v) for v in usable}
     # Server-rendered options for the first printer, so the form is complete before JS runs.
     filaments = "".join(
         f'<option value="{_e(c["value"])}"'
@@ -1249,10 +1451,27 @@ def _panel_printer_selects(views: list[PrinterView], default_printer: str) -> st
         if skipped
         else ""
     )
+    machine_options = "".join(
+        f'<option value="{_e(c["value"])}"{" selected" if c["default"] else ""}'
+        f"{' data-mmu' if c['mmu'] else ''}>{_e(c['label'])}</option>"
+        for c in (machines[first.printer.key] if first else [])
+    )
+    process_options = "".join(
+        f'<option value="{_e(c["value"])}"{" selected" if c["default"] else ""}>'
+        f"{_e(c['label'])}</option>"
+        for c in (processes[first.printer.key] if first else [])
+    )
     return (
         f'<label>Printer <select name="printer" required>{printers}</select></label>'
+        f"<label{'' if machine_options else ' hidden'}>Printer profile "
+        f'<select name="machine" data-choices="{_e(json.dumps(machines))}">'
+        f"{machine_options}</select></label>"
         f'<label>Filament <select name="filament" data-choices="{_e(json.dumps(choices))}">'
-        f"{filaments}</select></label>{note}"
+        f"{filaments}</select></label>"
+        '<label id="tool-slot" hidden>Load into <select name="filament_tool"></select></label>'
+        f"<label{'' if process_options else ' hidden'}>Process "
+        f'<select name="process" data-choices="{_e(json.dumps(processes))}">'
+        f"{process_options}</select></label>{note}"
     )
 
 
@@ -1290,8 +1509,6 @@ def _panel_body(
         )
     )
     orient = _options([("face", "Selected face down"), *ORIENT_CHOICES], "as-modeled")
-    waits_in = svc.start_note()
-    start = f"Waits in {waits_in} until you press Start." if waits_in else ""
     beds = {v.printer.key: v.printer.bed_mm or DEFAULT_BED for v in views}
     # The preview lays copies out like bambu_project.copy_offsets, with the same spacing.
     layout = {
@@ -1318,7 +1535,8 @@ def _panel_body(
 {_plate_select(cfg)}
 <label>Orientation <select name="orient">{orient}</select></label>
 {_settings_fields(cfg)}
-<p class="muted">{_e(start)}</p>
+{_extra_fields(cfg)}
+{_wait_field(svc)}
 <button type="submit" disabled>Slice and queue print</button>
 </form></div>
 <script src="/static/panel.js?v={static_version()}"></script>
@@ -1358,14 +1576,28 @@ def _who_line(name: str) -> str:
 
 
 def _studio_links(cfg: Config) -> str:
-    local = '<a id="studio-link" class="off" href="#">on this computer</a>'
-    if cfg.web_studio is None:
-        return f'<p class="links">Open in Bambu Studio: {local}</p>'
-    web = (
-        f'<a id="web-studio-link" class="off" href="{_e(cfg.web_studio.url)}" target="_blank" '
-        'rel="noopener">in the browser</a> <span id="web-studio-state" class="muted"></span>'
+    """The "Open in …" lines ([panel] web_slicer and local_slicer), one per slicer."""
+    links: dict[str, list[str]] = {}
+    for slicer in cfg.panel_web_slicers:
+        app = WEB_ROUTES[slicer]
+        ws: WebStudioConfig | None = getattr(cfg, WEB_APPS[app][0])
+        if ws is None:
+            continue
+        links.setdefault(slicer, []).append(
+            f'<a id="{app}-link" class="off web-app" href="{_e(ws.url)}" target="_blank" '
+            f'rel="noopener" data-app="{app}" data-label="{_e(WEB_APPS[app][1])}">'
+            f'in the browser</a> <span id="{app}-state" class="muted"></span>'
+        )
+    if cfg.panel_local_slicer:
+        # Opened by the slicer's URL handler on the user's computer (D-21).
+        links.setdefault(cfg.panel_local_slicer, []).append(
+            f'<a id="studio-link" class="off" href="#" data-scheme="{cfg.panel_local_slicer}">'
+            "on this computer</a>"
+        )
+    return "".join(
+        f'<p class="links">Open in {DESKTOP_SLICERS[slicer]}: {" · ".join(parts)}</p>'
+        for slicer, parts in links.items()
     )
-    return f'<p class="links">Open in Bambu Studio: {web} · {local}</p>'
 
 
 def _job_body(job: Job, ui_links: Iterable[tuple[str, str]] = ()) -> str:
@@ -1404,6 +1636,7 @@ h1 {{ font-size:1.25rem; margin:.2rem 0 1rem; }} h2 {{ font-size:1.05rem; }}
 dl {{ display:grid; grid-template-columns:auto 1fr; gap:.2rem .8rem; }} dt {{ color:var(--muted); }}
 dd {{ margin:0; overflow-wrap:anywhere; }}
 label {{ display:block; margin:.7rem 0 .2rem; }} label.check {{ display:flex; gap:.4rem; }}
+[hidden] {{ display:none !important; }}
 select,input[type=number] {{ display:block; width:100%; box-sizing:border-box;
   margin-top:.2rem; padding:.4rem; background:var(--bg); color:var(--fg);
   border:1px solid var(--line); border-radius:6px; }}

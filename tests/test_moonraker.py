@@ -89,7 +89,7 @@ def test_status_query_shape() -> None:
     make(fake).status(PRINTER)
     url = fake.requests[0].url
     assert url.path == "/printer/objects/query"
-    assert url.query == b"webhooks&print_stats&virtual_sdcard&extruder&heater_bed&toolhead"
+    assert url.query == b"webhooks&print_stats&virtual_sdcard&extruder&heater_bed&toolhead&mmu"
 
 
 @pytest.mark.parametrize(
@@ -264,3 +264,32 @@ def test_live_moonraker_read_only() -> None:
         print(h)
         print(m.status(PRINTER))
         assert h.summary
+
+
+def test_happy_hare_gates_are_the_tools() -> None:
+    from tests.fakes_printers import HAPPY_HARE, HAPPY_HARE_SPOOLS
+
+    fake = FakeMoonraker(mmu=HAPPY_HARE, spools=HAPPY_HARE_SPOOLS)
+    tools = make(fake).status(PRINTER).materials
+    assert [m.id for m in tools] == ["t0", "t1", "t2", "t3", "t4"]
+    assert [m.label for m in tools] == [
+        "T0: Black (ASA)", "T1: PolyLite™ ASA Blue (PETG)", "T2: CR-PETG Transparent",
+        "T3: ASA White", "T4: empty",
+    ]  # fmt: skip
+    assert [m.kind for m in tools] == ["ASA", "PETG", "PETG", "ASA", "ASA"]
+    assert tools[2].colour == "#00FFFF" and tools[4].colour == "#FF8400"
+    assert [m.raw["vendor"] for m in tools] == ["Ambrosia", "", "Creality", "Elegoo", "3DO"]
+    assert tools[4].raw["empty"] and not tools[0].raw["empty"]
+    assert all(m.profile == "" for m in tools)  # the core matches profiles
+
+
+def test_tool_map_follows_happy_hare_and_disabled_mmu_is_ignored() -> None:
+    from tests.fakes_printers import HAPPY_HARE
+
+    remapped = {**HAPPY_HARE, "ttg_map": [3, 0, -1], "gate_spool_id": [-1] * 5}
+    tools = make(FakeMoonraker(mmu=remapped)).status(PRINTER).materials
+    assert [(m.id, m.raw["gate"], m.label) for m in tools] == [
+        ("t0", 3, "T0: ASA White"), ("t1", 0, "T1: Black (ASA)"),
+    ]  # fmt: skip
+    off = {**HAPPY_HARE, "enabled": False}
+    assert make(FakeMoonraker(mmu=off)).status(PRINTER).materials == ()

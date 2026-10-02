@@ -1,6 +1,6 @@
 # os2slice
 
-Print Onshape parts from inside Onshape: pick the part, the face it stands on, the printer, the filament, walls, infill and supports, then send it. Each printer has a slicer (BamBuddy itself, or the Bambu Studio API add-on) and a target (BamBuddy's queue; Klipper/Moonraker and PrusaLink printers are built but not yet tested on hardware). Jobs wait until someone starts them (in BamBuddy: Start).
+Print Onshape parts from inside Onshape: pick the part, the face it stands on, the printer, the filament, walls, infill and supports, then send it. Each printer has a slicer (BamBuddy itself, or the Bambu Studio API add-on) and a target (BamBuddy's queue; Klipper/Moonraker and PrusaLink printers are built but not yet tested on hardware). Whoever prints chooses whether the job starts by itself or waits until someone presses Start in BamBuddy (the **Wait for Start** checkbox). Besides each printer, the printer menu offers **Any <model>**: BamBuddy then sends the job to the first idle printer of that model with the chosen filament (type and colour) loaded.
 
 The options below set up one BamBuddy that slices and queues. Other slicers and printers are added on the config page `/admin` (below); [`docs/MODULES.md`](https://github.com/jlbimson/os2slice/blob/main/docs/MODULES.md) explains the modules.
 
@@ -19,7 +19,7 @@ The options below set up one BamBuddy that slices and queues. Other slicers and 
 | `default_printer`, `presets` | BamBuddy printer name, and slicer presets per printer model |
 | `walls`, `infill`, `supports`, `build_plate_only`, `top_layers`, `bottom_layers`, `brim`, `copies` | Starting values shown on the print page |
 | `default_plate` | Build plate used unless a print or a preset's `bed_type` says otherwise. `High Temp Plate` is Bambu's name for smooth PEI |
-| `manual_start` | Keep `true`: queued jobs wait for Start in BamBuddy |
+| `manual_start` | Deprecated, has no effect (kept so existing settings still load). Prints start by themselves once the printer is free; whoever prints ticks **Wait for Start** on the page to make that print wait for Start in BamBuddy (the CLI has `--wait-for-start`) |
 | `admin_password` | Turns on the config page `/admin` (at least 12 characters); see below |
 | `reset_config` | Leave off. On: the next start writes `config.toml` again from these options, discarding edits made on `/admin`; turn it off again afterwards |
 
@@ -31,11 +31,13 @@ The log starts with a pass/fail table from `os2slice doctor`.
 
 ## The config page `/admin`
 
-The service has a config page for printers and slicers (modules), print defaults, the Onshape and server settings, secrets, `doctor`, jobs and the log, at `https://<host>:8443/admin` (the first of `hosts`, e.g. `https://print.example.duckdns.org:8443/admin`).
+The service has a config page for printers and slicers (modules), print defaults, the Onshape and server settings, secrets, `doctor`, jobs and the log, at `https://<host>:8443/admin` (the first of `hosts`, e.g. `https://print.example.duckdns.org:8443/admin`). The add-on's info page in Home Assistant has an **Open Web UI** button for it: it opens a plain-HTTP port (8444 on the host) that only redirects to that address.
 
 **Password.** The page is off until you set `admin_password` on the Configuration tab and restart the add-on. The add-on stores only a hash of it (`/data/state/os2slice/admin.json`); the password is never logged. A restart with the same password keeps everyone signed in; a new one signs every admin session out. Clearing the option later doesn't turn the page off: the stored password keeps working (delete `admin.json` to remove it). A password shorter than 12 characters stops the add-on with an error saying so. There is no way to set the password from a browser.
 
 **What persists.** `config.toml` (`/data/os2slice/config.toml`) is written from the options on the first start and whenever the options it is built from change (or a new add-on version builds it differently); otherwise it is kept as it is, so edits made on `/admin` persist across restarts. Changing any of those options on the Configuration tab replaces the file, and with it the page's edits, so after you start using `/admin` treat the page as the place for settings. `reset_config` forces that rewrite once. Settings on the page's Server and Onshape sections need a restart; everything else applies at once.
+
+**Wait for Start default.** Whether the **Wait for Start** box starts ticked is set on the page under **Print defaults** ("Wait for Start by default"), not on the Configuration tab. It applies to every target (BamBuddy, Moonraker, PrusaLink); whoever prints can still change it per print. It is off unless you turn it on.
 
 **Secrets.** Secrets saved on the page go to `/data/state/os2slice/secrets.json` (readable only by the service), never into `config.toml`. Which one is used:
 

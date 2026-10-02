@@ -1,0 +1,8 @@
+{
+  "name": "os2slice-panel-tests",
+  "private": true,
+  "description": "The print panel's script (src/os2slice/static/panel.js) in jsdom; run by tests/test_panel_js.py",
+  "devDependencies": {
+    "jsdom": "24.1.3"
+  }
+}

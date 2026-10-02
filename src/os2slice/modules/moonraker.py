@@ -68,7 +68,9 @@ IDLE_STATES = frozenset({"standby", "complete", "cancelled"})
 BUSY_STATES = frozenset({"printing", "paused"})
 STATUS_QUERY = (
     "/printer/objects/query?webhooks&print_stats&virtual_sdcard&extruder&heater_bed&toolhead"
+    "&mmu"  # Happy Hare's filament changer, when there is one (absent objects are left out)
 )
+MAX_TOOLS = 16  # as many filaments as a slice takes
 SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 TIMEOUT = httpx.Timeout(10.0)
 UPLOAD_TIMEOUT = httpx.Timeout(10.0, read=120.0, write=300.0)
@@ -226,7 +228,8 @@ class Moonraker:
             detail = ", ".join(b for b in bits if b)
         elif state == "error":
             detail = str(stats.get("message") or "")
-        return PrinterStatus(state, True, ready, detail, self._materials(), raw=status)
+        materials = self._tools(status.get("mmu")) or self._materials()
+        return PrinterStatus(state, True, ready, detail, materials, raw=status)
 
     def submit(
         self,
@@ -274,6 +277,58 @@ class Moonraker:
             return Submission(where, "started", detail, self.ui_url, raw=body)
         detail = f"Uploaded to {where}, but Moonraker didn't start it; start it from Mainsail"
         return Submission(where, "waiting", detail, self.ui_url, raw=body)
+
+    # -- Happy Hare (MMU) -----------------------------------------------------
+
+    def _tools(self, mmu: Any) -> tuple[Material, ...]:
+        """The filament changer's tools, T0 first: each the gate its tool map points at,
+        with the gate's material, colour and name, and its Spoolman spool's vendor. The
+        core matches them to filament profiles (Material.raw["tool"] marks a tool)."""
+        if not isinstance(mmu, dict) or not mmu.get("enabled"):
+            return ()
+        ttg = mmu.get("ttg_map")
+        if not isinstance(ttg, list):
+            return ()
+
+        def at(key: str, gate: int) -> Any:
+            values = mmu.get(key)
+            return values[gate] if isinstance(values, list) and gate < len(values) else None
+
+        tools = []
+        for tool, gate in enumerate(ttg[:MAX_TOOLS]):
+            if not isinstance(gate, int) or isinstance(gate, bool) or gate < 0:
+                continue
+            material = str(at("gate_material", gate) or "").strip()[:40]
+            name = str(at("gate_filament_name", gate) or "").strip()[:80]
+            hexes = str(at("gate_color", gate) or "")[:6]
+            colour = f"#{hexes.upper()}" if re.fullmatch(r"[0-9A-Fa-f]{6}", hexes) else None
+            spool = at("gate_spool_id", gate)
+            vendor = self._spool_vendor(spool) if isinstance(spool, int) and spool >= 0 else ""
+            empty = at("gate_status", gate) == 0
+            shown = name or material or "unknown filament"
+            if material and material.upper() not in shown.upper():
+                shown += f" ({material})"
+            label = f"T{tool}: {'empty' if empty else shown}"
+            raw = {"tool": tool, "gate": gate, "name": name, "vendor": vendor, "empty": empty}
+            tools.append(Material(f"t{tool}", label, material, colour, raw=raw))
+        return tuple(tools)
+
+    def _spool_vendor(self, spool_id: int) -> str:
+        try:
+            body = self._json(
+                self._request(
+                    "POST",
+                    "/server/spoolman/proxy",
+                    json={"use_v2_response": True, "request_method": "GET",
+                          "path": f"/v1/spool/{spool_id}"},
+                )
+            )  # fmt: skip
+        except ModuleError as e:
+            log.warning("moonraker %s: no Spoolman spool %s: %s", self.url, spool_id, e.one_line())
+            return ""
+        spool = body.get("response") if isinstance(body.get("response"), dict) else body
+        vendor = ((spool or {}).get("filament") or {}).get("vendor") or {}
+        return str(vendor.get("name") or "")[:40] if isinstance(vendor, dict) else ""
 
     # -- Spoolman ------------------------------------------------------------
 

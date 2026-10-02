@@ -27,4 +27,9 @@ docs/PLAN.md
 # Docker Compose: local settings, secrets and certificates
 /docker/config.toml
 /certs/
+/orca-profiles/
 .claude/worktrees/
+/admin-password.txt
+
+# The panel script test (tests/js): npm ci installs jsdom here
+/tests/js/node_modules/

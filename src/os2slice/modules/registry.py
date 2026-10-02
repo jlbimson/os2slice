@@ -21,8 +21,10 @@ from os2slice.modules.bambuddy import BambuddyModule
 from os2slice.modules.base import (
     Field,
     Material,
+    ModuleError,
     ModuleSpec,
     PrinterInfo,
+    ProfileCatalog,
     Slicer,
     Target,
 )
@@ -165,7 +167,6 @@ class Modules:
     targets: dict[str, Any] = field(default_factory=dict)
     configured: dict[str, PrinterConfig] = field(default_factory=dict)
     default_printer: str = ""
-    manual_start: dict[str, bool] = field(default_factory=dict)  # by target key
 
     @classmethod
     def from_config(
@@ -191,7 +192,6 @@ class Modules:
             }
             module = build_target(t.kind, values, key=key, transport=per_key.get(key, transport))
             mods.targets[key] = module
-            mods.manual_start[key] = bool(t.values.get("manual_start", True))
             if spec.role == "both":
                 mods.slicers[key] = module
         for key, s in cfg.slicer_modules.items():
@@ -263,9 +263,32 @@ class Modules:
             )
         return self.slicers[printer.slicer]  # type: ignore[no-any-return]
 
-    def starts(self, printer: PrinterInfo) -> bool:
-        """Whether a submitted print may start by itself (manual_start = false)."""
-        return not self.manual_start.get(printer.target, True)
+    def own_profiles(self, printer: PrinterInfo) -> ProfileCatalog:
+        """The user's own profiles in the printer's slicer (a sidecar's `profile_dir`), for
+        the panel's menus. Empty for a slicer without them, or when they can't be read."""
+        own = getattr(self.slicers.get(printer.slicer), "own_profiles", None)
+        if own is None:
+            return ProfileCatalog()
+        try:
+            return own()  # type: ignore[no-any-return]
+        except ModuleError as e:
+            log.warning("%s: own profiles unreadable: %s", printer.slicer, e.one_line())
+            return ProfileCatalog()
+
+    def pool_presets(self, printer: PrinterInfo) -> tuple[str, ...]:
+        """For a printer pool: the filament presets its target offers besides what is
+        loaded (BamBuddy: every preset made for the model). Empty for other printers,
+        targets without the method, or when they can't be read."""
+        if not printer.pool:
+            return ()
+        presets = getattr(self.targets.get(printer.target), "filament_presets", None)
+        if presets is None:
+            return ()
+        try:
+            return tuple(presets(printer))
+        except ModuleError as e:
+            log.warning("%s: filament presets unreadable: %s", printer.target, e.one_line())
+            return ()
 
     def ui_links(self, request_host: str = "") -> list[tuple[str, str]]:
         """(label, url) of each target's own UI that has one, for the panel and job pages."""

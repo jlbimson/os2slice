@@ -52,6 +52,7 @@ from keyring.backends import null as keyring_null
 
 from os2slice.errors import AuthError
 from os2slice.logsetup import state_dir
+from os2slice.runtime import DOCKER, HOME_ASSISTANT, runtime
 from os2slice.tomlwrite import write_atomic
 
 log = logging.getLogger(__name__)
@@ -330,7 +331,11 @@ def load_oauth_client_secret() -> str:
     secret = os.environ.get(ENV_OAUTH_SECRET, "")
     if secret:
         return secret
-    raise AuthError(
-        "No Onshape OAuth client secret found",
-        "Set onshape_oauth_client_secret on the add-on's Configuration tab",
-    )
+    where = runtime()
+    if where == HOME_ASSISTANT:
+        fix = "Set onshape_oauth_client_secret on the add-on's Configuration tab"
+    elif where == DOCKER:
+        fix = f"Set {ENV_OAUTH_SECRET} in .env, then run docker compose up -d"
+    else:
+        fix = f"Run os2slice setup-keys --secret {OAUTH_SECRET_ENTRY}, or set ${ENV_OAUTH_SECRET}"
+    raise AuthError("No Onshape OAuth client secret found", fix)

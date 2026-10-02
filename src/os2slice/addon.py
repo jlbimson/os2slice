@@ -41,6 +41,7 @@ OPTIONS = Path("/data/options.json")
 DATA = Path("/data")
 SSL = Path("/ssl")
 PORT = 8443  # inside the container; the host port is set on the add-on's Network tab
+REDIRECT_PORT = 8080  # plain HTTP, only 303s to https://<hosts[0]>/admin (Open Web UI)
 SECRET_OPTIONS = {  # option -> environment variable, by [onshape] auth mode (D-23)
     "keys": {
         "onshape_access_key": "ONSHAPE_ACCESS_KEY",
@@ -117,7 +118,9 @@ def render_config(opts: dict[str, Any], ssl_dir: Path = SSL) -> str:
             else []
         ),
         f"default_printer = {s(opts.get('default_printer', ''))}",
-        f"manual_start = {'true' if opts.get('manual_start', True) else 'false'}",
+        # Deprecated, no effect (the person printing chooses Wait for Start). Still
+        # rendered so the output stays byte-identical for the same options.
+        f"manual_start = {'true' if opts.get('manual_start', False) else 'false'}",
         "",
     ]
     for preset in opts.get("presets") or []:
@@ -256,6 +259,10 @@ def prepare(
     os.environ["XDG_STATE_HOME"] = str(data / "state")
     os.environ.setdefault("PYTHON_KEYRING_BACKEND", "keyring.backends.null.Keyring")
     os.environ["OS2SLICE_ADDON"] = "1"
+    os.environ["OS2SLICE_RUNTIME"] = "home-assistant"
+    # Not in config.toml: a changed rendering would count as "the options changed" and
+    # replace the file, dropping the edits made on /admin. `serve` reads this instead.
+    os.environ["OS2SLICE_REDIRECT_PORT"] = str(REDIRECT_PORT)
     _apply_admin_password(password, state / "admin.json", say)
     path = data / "os2slice" / "config.toml"
     _write_config(text, path, bool(opts.get("reset_config")), say)

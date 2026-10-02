@@ -79,6 +79,7 @@ src/os2slice/
   request.py      query params / Onshape browser URL → ExportRequest (validation lives here)
   pipeline.py     local mode: ExportRequest → export → save → launch → notify; returns a Result (send, handle)
   server.py       stdlib ThreadingHTTPServer: routing, Host/identity/Sec-Fetch checks, /print, /panel, /jobs, sign-in, TLS reload
+  redirect.py     optional plain-HTTP listener ([server] redirect_port) that only 303s to https://<hosts[0]>/admin
   admin.py        the config page /admin: forms that edit config.toml, secrets, doctor, jobs, log (D-28, D-31)
   adminauth.py    admin password (scrypt hash in admin.json), login rate limit, admin sessions
   tomlwrite.py    small TOML writer for our own schema + atomic file writes (used by admin.py)
@@ -154,6 +155,8 @@ The param rules apply to both modes. The print service (`server.py`, with `admin
 | responses | CSP `default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; base-uri 'none'` plus `frame-ancestors 'none'` (the panel and the job pages it opens: the configured Onshape host) and, on pages with scripts, `script-src 'self'; connect-src 'self'`; `nosniff`, `Referrer-Policy: same-origin` (with `no-referrer` browsers send `Origin: null` on our own POSTs), `no-store`. Every interpolated value is HTML-escaped |
 
 Any web page can navigate a browser to the service, so every request is hostile until proven otherwise.
+
+**Redirect listener (`redirect.py`, `[server] redirect_port`, off by default).** Home Assistant's "Open Web UI" button only accepts `http(s)://[HOST]:[PORT:n]…`, where `[HOST]` is whatever name the browser used for Home Assistant, so it can't point at the HTTPS service (certificate for the DuckDNS name, every other `Host` refused). With `redirect_port` set (only allowed with `identity = "lan"`, and different from `port`), `serve` also binds `server.bind:redirect_port` over plain HTTP, and that listener answers every `GET`/`HEAD`, on any path and with any `Host`, with `303 Location: https://<server.hosts[0]>/admin` and `Cache-Control: no-store`; every other method gets 405. It never serves content, never reads a request body, and never echoes the path, `Host` or anything else from the request into the response or the log. The add-on sets it to 8080 (published on host port 8444) through `OS2SLICE_REDIRECT_PORT`, which `serve` takes as an override, rather than in `config.toml`: the add-on only rewrites that file when its rendering of the options changes, and a new line would have counted as a change and dropped the edits made on `/admin`.
 
 ### HTTP layer of the local listener (D-3, D-9; not wired up in this tree)
 

@@ -40,13 +40,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from urllib.parse import SplitResult, parse_qsl, urlencode, urlsplit
 
-from os2slice import __version__, auth, config, tomlwrite
+from os2slice import __version__, auth, config, extra_settings, tomlwrite
 from os2slice.adminauth import SESSION_TTL, PasswordError
 from os2slice.errors import BadRequest, ConfigError, Os2sliceError
 from os2slice.logsetup import log_path
 from os2slice.modules import registry
 from os2slice.modules.base import Field, ModuleSpec, ProfileCatalog
 from os2slice.request import SLICER_KEY_RE
+from os2slice.runtime import DOCKER, HOME_ASSISTANT, runtime
 from os2slice.settings import (
     BED_TYPES,
     COPIES_RANGE,
@@ -87,6 +88,7 @@ SECTIONS = (
     ("/admin/onshape", "Onshape"),
     ("/admin/server", "Server"),
     ("/admin/defaults", "Print defaults"),
+    ("/admin/panel", "Onshape panel"),
     ("/admin/jobs", "Jobs"),
     ("/admin/log", "Log"),
     ("/admin/secrets", "Secrets"),
@@ -332,7 +334,8 @@ def _chrome(ctx: Ctx, here: str) -> str:
     )
     logout = ctx.form("/admin/logout", "", "Sign out", cls="small")
     notes = "".join(f'<div class="msg">{_e(n)}</div>' for n in _restart_notes(ctx.svc))
-    if _addon():
+    where = runtime()
+    if where == HOME_ASSISTANT:
         notes += (
             '<div class="msg">Running as the Home Assistant add-on: changes made here '
             "persist across restarts until the options on the add-on's Configuration tab "
@@ -340,16 +343,17 @@ def _chrome(ctx: Ctx, here: str) -> str:
             "Secrets saved here are used while the matching option on that tab is empty; "
             "a filled-in option replaces them at the next start.</div>"
         )
+    elif where == DOCKER:
+        notes += (
+            '<div class="msg">Running in Docker: changes made here are written to '
+            "docker/config.toml on the host (comments aren't kept). Secrets saved here go to "
+            "the os2slice-data volume and win over the same ones in .env. After editing "
+            "config.toml on the host, run docker compose restart os2slice.</div>"
+        )
     return (
         f'{CSS}<nav class="admin">{links} {logout}</nav>'
         f'<p class="file">Editing {_e(ctx.svc.cfg.path)}</p>{notes}'
     )
-
-
-def _addon() -> bool:
-    from os2slice import cli
-
-    return cli.ADDON
 
 
 def _restart_notes(svc: Service) -> list[str]:
@@ -1535,7 +1539,9 @@ def _post_onshape(ctx: Ctx, form: dict[str, str]) -> None:
     ctx.redirect("/admin/onshape?saved=1")
 
 
-SERVER_NAMES = {"bind", "port", "hosts", "identity", "allowed_users", "tls_cert", "tls_key"}
+SERVER_NAMES = {
+    "bind", "port", "hosts", "identity", "allowed_users", "tls_cert", "tls_key", "redirect_port",
+}  # fmt: skip
 
 
 def _server_vals(cfg: config.Config) -> dict[str, str]:
@@ -1548,6 +1554,7 @@ def _server_vals(cfg: config.Config) -> dict[str, str]:
         "allowed_users": "\n".join(s.allowed_users),
         "tls_cert": str(s.tls_cert or ""),
         "tls_key": str(s.tls_key or ""),
+        "redirect_port": str(s.redirect_port or ""),
     }
 
 
@@ -1565,6 +1572,8 @@ def _get_server(ctx: Ctx, params: dict[str, str], vals: Mapping[str, str] | None
         + _area("allowed_users", "Tailscale logins (one per line)", v.get("allowed_users", ""))
         + _text("tls_cert", "TLS certificate (PEM chain)", v.get("tls_cert", ""))
         + _text("tls_key", "TLS private key", v.get("tls_key", ""))
+        + _text("redirect_port", "Redirect port (plain HTTP)", v.get("redirect_port", ""),
+                kind="number", help="lan only: redirects to the HTTPS /admin page; empty = off")
     )  # fmt: skip
     body = (
         _saved(params) + _msg(error, "bad")
@@ -1594,6 +1603,11 @@ def _post_server(ctx: Ctx, form: dict[str, str]) -> None:
         for k in ("tls_cert", "tls_key"):
             if vals[k].strip():
                 tbl[k] = vals[k].strip()
+        redirect_port = vals["redirect_port"].strip()
+        if redirect_port and redirect_port != "0":
+            if not re.fullmatch(r"[0-9]{1,5}", redirect_port):
+                raise Invalid("The redirect port must be a whole number, or empty for off")
+            tbl["redirect_port"] = int(redirect_port)
         data["server"] = tbl
 
     try:
@@ -1604,9 +1618,13 @@ def _post_server(ctx: Ctx, form: dict[str, str]) -> None:
     ctx.redirect("/admin/server?saved=1")
 
 
+PRINT_SETTING_NAMES = {
+    "walls", "infill", "supports", "build_plate_only", "top_layers", "bottom_layers", "brim",
+    "copies",
+}  # fmt: skip
 DEFAULT_NAMES = {
     "walls", "infill", "supports", "build_plate_only", "top_layers", "bottom_layers", "brim",
-    "copies", "bed_type",
+    "copies", "bed_type", "wait_for_start",
 }  # fmt: skip
 
 
@@ -1622,6 +1640,7 @@ def _defaults_vals(cfg: config.Config) -> dict[str, str]:
         "brim": "on" if p.brim else "",
         "copies": str(p.copies),
         "bed_type": cfg.default_bed_type or "",
+        "wait_for_start": "on" if cfg.default_wait_for_start else "",
     }
 
 
@@ -1644,6 +1663,9 @@ def _get_defaults(ctx: Ctx, params: dict[str, str], vals: Mapping[str, str] | No
         + num("copies", "Copies", COPIES_RANGE)
         + _select("bed_type", "Build plate", _plate_choices(), v.get("bed_type", ""),
                   "a printer's or model's own plate wins")
+        + _check("wait_for_start", "Wait for Start by default (queued prints wait for a "
+                 "person; every target)", bool(v.get("wait_for_start")),
+                 "the Wait for Start box starts ticked; people can untick it per print")
     )  # fmt: skip
     body = (
         _saved(params) + _msg(error, "bad")
@@ -1657,11 +1679,14 @@ def _post_defaults(ctx: Ctx, form: dict[str, str]) -> None:
     _expect(form, DEFAULT_NAMES)
     vals = {k: form.get(k, "") for k in DEFAULT_NAMES}
     try:
-        strings = {k: v for k, v in vals.items() if k != "bed_type"}
+        strings = {k: v for k, v in vals.items() if k in PRINT_SETTING_NAMES}
         try:
             s = PrintSettings.from_strings(strings, PrintSettings())
         except BadRequest as e:
             raise Invalid(e.message) from e
+        if vals["wait_for_start"] not in ("", "on"):
+            raise Invalid("Invalid Wait for Start choice")
+        wait = vals["wait_for_start"] == "on"
 
         def mutate(data: dict[str, Any]) -> None:
             tbl: dict[str, Any] = {
@@ -1676,6 +1701,7 @@ def _post_defaults(ctx: Ctx, form: dict[str, str]) -> None:
             }
             if vals["bed_type"]:
                 tbl["bed_type"] = vals["bed_type"]
+            tbl["wait_for_start"] = wait
             data["print_defaults"] = tbl
 
         _save(ctx.svc, mutate, "print_defaults")
@@ -1683,6 +1709,83 @@ def _post_defaults(ctx: Ctx, form: dict[str, str]) -> None:
         _get_defaults(ctx, {}, vals, e.message, 400)
         return
     ctx.redirect("/admin/defaults?saved=1")
+
+
+# ---------------------------------------------------------------------------
+# The Onshape panel: its "Open in …" links and extra settings ([panel])
+
+PANEL_NAMES = {"local_slicer", "web_slicer", *(f"extra_{key}" for key in extra_settings.BY_KEY)}
+
+
+def _panel_vals(cfg: config.Config, raw: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        "local_slicer": cfg.panel_local_slicer or "none",
+        "web_slicer": str(raw.get("web_slicer", "")),
+        **{f"extra_{key}": "on" for key in cfg.panel_extras},
+    }
+
+
+def _get_panel_settings(ctx: Ctx, params: dict[str, str], vals: Mapping[str, str] | None = None,
+                        error: str = "", status: int = 200) -> None:  # fmt: skip
+    cfg = ctx.svc.file_cfg
+    v = vals or _panel_vals(cfg, _table(_raw(ctx.svc), "panel"))
+    local = [(name, label) for name, label in config.DESKTOP_SLICERS.items()] + [("none", "None")]
+    web: list[tuple[str, str]] = [("", "Every one that is set up")]
+    missing = []
+    for name, label in config.DESKTOP_SLICERS.items():
+        ws = getattr(cfg, config.WEB_SLICER_TABLES[name])
+        if ws is None:
+            missing.append(f"{label} ([{config.WEB_SLICER_TABLES[name]}])")
+        else:
+            web.append((name, f"{label}, {ws.url}"))
+    web.append(("none", "None"))
+    note = f"Not set up here: {', '.join(missing)}." if missing else ""
+    inner = (
+        "<h2>Open in a slicer</h2>"
+        + _select("local_slicer", "On this computer", local, v.get("local_slicer", ""),
+                  "the slicer installed on each user's own computer; the link uses its URL "
+                  "handler")
+        + _select("web_slicer", "In the browser", web, v.get("web_slicer", ""),
+                  f"the shared slicer session(s) on this server. {note}".strip())
+        + "<h2>More settings</h2>"
+        + "<p class=muted>Each one ticked appears in the panel, empty: the profile's own value "
+          "applies until someone fills it in. Filament settings go into every filament of the "
+          "print; BamBuddy printers can't take them.</p>"
+        + "".join(
+            _check(f"extra_{x.key}", f"{x.label}{f' ({x.unit})' if x.unit else ''}",
+                   bool(v.get(f"extra_{x.key}")),
+                   f"{x.scope} setting {x.key}" + (f"; {x.help}" if x.help else ""))
+            for x in extra_settings.CATALOG
+        )
+    )  # fmt: skip
+    body = _saved(params) + _msg(error, "bad") + ctx.form("/admin/panel", inner)
+    ctx.page("Onshape panel", body, status, "/admin/panel")
+
+
+def _post_panel_settings(ctx: Ctx, form: dict[str, str]) -> None:
+    _expect(form, PANEL_NAMES)
+    vals = {k: form.get(k, "") for k in PANEL_NAMES}
+    try:
+
+        def mutate(data: dict[str, Any]) -> None:
+            panel = dict(data.get("panel") or {})
+            panel["local_slicer"] = vals["local_slicer"] or "bambu-studio"
+            if vals["web_slicer"]:
+                panel["web_slicer"] = vals["web_slicer"]
+            else:
+                panel.pop("web_slicer", None)
+            chosen = [x.key for x in extra_settings.CATALOG if vals.get(f"extra_{x.key}")]
+            if chosen:
+                panel["extra_settings"] = chosen
+            else:
+                panel.pop("extra_settings", None)
+            data["panel"] = panel
+
+        _save(ctx.svc, mutate, "panel")
+    except Invalid as e:
+        _get_panel_settings(ctx, {}, vals, e.message, 400)
+        return
+    ctx.redirect("/admin/panel?saved=1")
 
 
 # ---------------------------------------------------------------------------
@@ -1839,6 +1942,7 @@ GET_ROUTES: dict[str, tuple[Get, tuple[str, ...]]] = {
     "/admin/onshape": (_get_onshape, SAVED),
     "/admin/server": (_get_server, SAVED),
     "/admin/defaults": (_get_defaults, SAVED),
+    "/admin/panel": (_get_panel_settings, SAVED),
     "/admin/jobs": (_get_jobs, ()),
     "/admin/log": (_get_log, ()),
     "/admin/secrets": (_get_secrets, SAVED),
@@ -1858,5 +1962,6 @@ POST_ROUTES: dict[str, Post] = {
     "/admin/onshape": _post_onshape,
     "/admin/server": _post_server,
     "/admin/defaults": _post_defaults,
+    "/admin/panel": _post_panel_settings,
     "/admin/secrets": _post_secrets,
 }

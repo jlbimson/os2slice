@@ -8,7 +8,9 @@ target modules (docs/MODULES.md, D-27); this file knows no service by name.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -16,6 +18,7 @@ from datetime import datetime
 from os2slice import files
 from os2slice.config import Config
 from os2slice.errors import BadRequest, ConfigError
+from os2slice.filaments import preset_label
 from os2slice.modules import bambu_project
 from os2slice.modules.base import (
     MEDIA_GCODE_3MF,
@@ -26,6 +29,7 @@ from os2slice.modules.base import (
     PartGeometry,
     PrinterInfo,
     PrinterStatus,
+    ProfileCatalog,
     Profiles,
     SliceInput,
     SliceOutput,
@@ -45,7 +49,7 @@ from os2slice.orientation import (
 )
 from os2slice.request import ExportRequest
 from os2slice.settings import PrintSettings, check_bed_type
-from os2slice.threemf import project_settings_of, with_project_settings
+from os2slice.threemf import orca_version_of, project_settings_of, with_project_settings
 
 log = logging.getLogger(__name__)
 
@@ -80,6 +84,9 @@ class PrintPlan:
     material: Material | None = None  # loaded material to print from; None = profile filament
     bed_type: str | None = None  # build plate; None = the process profile's default
     extra: tuple[PartChoice, ...] = ()  # further parts of a multi-material print
+    # A filament changer's tools, all of them in tool order, when the parts print from
+    # tools: the slicer loads every one so T<n> stays the changer's tool n.
+    tools: tuple[Material, ...] = ()
 
     @property
     def parts(self) -> tuple[PartChoice, ...]:
@@ -91,6 +98,14 @@ class PrintPlan:
     @property
     def multi(self) -> bool:
         return bool(self.extra)
+
+    def to_load(self) -> list[str]:
+        """'T2: load PM ASA (now CR-PETG Transparent)' for tools the user assigned."""
+        return [
+            f"T{m.raw['tool']}: load {m.profile} (now {m.raw['replaces']})"
+            for m in self.tools
+            if m.raw.get("planned")
+        ]
 
     def summary_lines(self) -> list[str]:
         if self.multi:
@@ -110,7 +125,9 @@ class PrintPlan:
             *what,
             f"Printer:     {self.printer.name} ({self.printer.model}), "
             f"now {self.status.describe()}",
-            f"Presets:     {self.profiles.process} / {self.profiles.filament}",
+            f"Presets:     {self.profiles.printer} / {self.profiles.process} / "
+            f"{self.profiles.filament}",
+            *(f"Before start: {line}" for line in self.to_load()),
             f"Plate:       {self.bed_type or 'process preset default'}",
             f"Orientation: {self.orientation.describe()}",
             f"Settings:    {self.settings.describe()}",
@@ -118,6 +135,8 @@ class PrintPlan:
             + (
                 f"waits in {self.target_label}'s queue until you press Start"
                 if self.manual_start
+                else f"starts on the first free {self.printer.model} with the filament loaded"
+                if self.printer.pool
                 else "starts as soon as the printer is free"
             ),
         ]
@@ -180,14 +199,100 @@ def has_profiles(printer: PrinterInfo) -> bool:
     return bool(printer.slicer and (p.printer or p.process or p.filament))
 
 
-def materials_of(printer: PrinterInfo, status: PrinterStatus) -> tuple[Material, ...]:
-    """What the printer has loaded, or its configured materials when the target can't tell."""
-    return status.materials or printer.materials
+def materials_of(
+    printer: PrinterInfo,
+    status: PrinterStatus,
+    own: ProfileCatalog | None = None,
+    presets: tuple[str, ...] = (),
+) -> tuple[Material, ...]:
+    """What the printer has loaded; when the target can't tell, its configured materials,
+    else the user's own filament profiles in its slicer (`own`), one choice each.
+
+    Loaded materials without a profile get the user's best match (`match_profile`). A
+    filament changer's tools (Material.raw["tool"]) come first, then the own profiles,
+    for prints that don't use the changer.
+
+    A printer pool also offers `presets` (Modules.pool_presets) after what is loaded:
+    filament presets nobody has to have loaded (Material.raw["preset"]).
+    """
+    loaded = status.materials or printer.materials
+    if printer.pool:
+        return loaded + tuple(preset_material(name) for name in presets)
+    if own is not None and own.filament_types:
+        loaded = tuple(
+            m
+            if m.profile or m.raw.get("empty")
+            else replace(m, profile=match_profile(m, printer, own))
+            for m in loaded
+        )
+    if loaded and not any(is_tool(m) for m in loaded):
+        return loaded
+    colours = own.filament_colours if own else {}
+    return loaded + tuple(
+        profile_material(name, colours.get(name)) for name in (own.filament if own else ())
+    )
+
+
+# A filament profile assigned to a changer tool from the panel: "t<tool>.<material id>"
+# (or ".preset", the printer's own filament).
+SLOT_RE = re.compile(r"t(\d{1,2})\.(f-[0-9a-f]{12}|preset)")
+
+
+def is_tool(material: Material) -> bool:
+    return "tool" in material.raw
+
+
+def match_profile(material: Material, printer: PrinterInfo, own: ProfileCatalog) -> str:
+    """The user's filament profile for a loaded material: one of its type, preferring a
+    name with the spool's vendor in it, then words of the filament's name, then the
+    printer's own filament, then the first by name. "" when none has that type."""
+    kind = material.kind.casefold()
+    candidates = sorted(
+        (n for n, t in own.filament_types.items() if kind and t.casefold() == kind),
+        key=str.casefold,
+    )
+    if not candidates:
+        return ""
+    vendor = str(material.raw.get("vendor") or "").casefold()
+    name_words = set(_words(str(material.raw.get("name") or ""))) - {kind}
+
+    def score(name: str) -> tuple[bool, int, bool]:
+        words = set(_words(name))
+        return (
+            bool(vendor) and vendor in name.casefold(),
+            len(words & name_words),
+            name == printer.profiles.filament,
+        )
+
+    return max(candidates, key=score)  # max keeps the first of equals: by name
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", text.casefold())
+
+
+def profile_material(profile: str, colour: str | None = None) -> Material:
+    """A filament profile offered as a material. Its id is stable while the name is."""
+    digest = hashlib.sha256(profile.encode()).hexdigest()[:12]
+    return Material(id=f"f-{digest}", label=profile, colour=colour, profile=profile)
+
+
+def preset_material(profile: str) -> Material:
+    """A pool's filament preset offered as a material: sliced with as is, no colour, and
+    queued without a filament override (BamBuddy matches the file's filament type)."""
+    m = profile_material(profile)
+    return replace(m, label=preset_label(profile), raw={"preset": True})
+
+
+def is_preset(material: Material) -> bool:
+    return bool(material.raw.get("preset"))
 
 
 def usable(material: Material, printer: PrinterInfo) -> bool:
     """A material can be printed from once it has a profile and, with two nozzles, a nozzle."""
-    return bool(material.profile) and (printer.nozzle_count <= 1 or material.extruder is not None)
+    return bool(material.profile) and (
+        printer.nozzle_count <= 1 or printer.pool or material.extruder is not None
+    )
 
 
 def media_for(slicer: ModuleSpec, target: ModuleSpec) -> Media:
@@ -209,6 +314,9 @@ def plan_print(
     material: str | None = None,
     bed_type: str | None = None,
     extra_parts: list[tuple[str, str]] | None = None,
+    process: str | None = None,
+    machine: str | None = None,
+    manual_start: bool = False,
 ) -> PrintPlan:
     """Gather everything for the confirmation. Reads from Onshape and the target only.
 
@@ -216,7 +324,9 @@ def plan_print(
     is a Material.id from the printer's status (a global tray id on BamBuddy); the
     filament profile then follows the loaded material instead of the configured one.
     `extra_parts` makes it a multi-material print: more (part id, material id) pairs
-    printed as one object.
+    printed as one object. `process` and `machine` pick one of the user's own process and
+    printer profiles in the printer's slicer instead of the configured ones.
+    `manual_start` is the person's Wait for Start choice (default: start by itself).
     """
     if not modules.targets:
         raise ConfigError(
@@ -232,14 +342,17 @@ def plan_print(
         )
     target = modules.target_for(chosen)
     status = target.status(chosen)
-    loaded = {m.id: m for m in materials_of(chosen, status)}
+    own = modules.own_profiles(chosen)
+    loaded = {m.id: m for m in materials_of(chosen, status, own, modules.pool_presets(chosen))}
     dual = chosen.nozzle_count > 1
 
     def resolve(mid: str) -> Material:
+        if (slot := SLOT_RE.fullmatch(mid)) is not None:
+            return assign(f"t{slot.group(1)}", slot.group(2))
         m = loaded.get(mid)
         if m is None:
             raise BadRequest(f"Nothing is loaded in slot {mid} on {chosen.name}")
-        if dual and m.extruder is None:
+        if dual and m.extruder is None and not chosen.pool:
             raise BadRequest(
                 f"Can't tell which nozzle {m.label} on {chosen.name} feeds",
                 "Check the AMS assignment on the printer, or use the preset filament",
@@ -248,7 +361,40 @@ def plan_print(
             raise BadRequest(f"No slicer preset for {m.kind} on {chosen.name}")
         return m
 
+    def assign(tool_id: str, source: str) -> Material:
+        """A filament profile in a changer tool it isn't loaded in yet (the user loads it
+        before starting): the tool, holding that profile."""
+        tool = loaded.get(tool_id)
+        if tool is None or not is_tool(tool):
+            raise BadRequest(f"{chosen.name} has no tool {tool_id.upper()}")
+        if source == "preset":
+            profile = chosen.profiles.filament
+        else:
+            src = loaded.get(source)
+            if src is None or is_tool(src) or not src.profile:
+                raise BadRequest("Pick a filament profile to load into the tool")
+            profile = src.profile
+        if profile == tool.profile and not tool.raw.get("empty"):
+            return tool  # already loaded there
+        n = int(tool.raw["tool"])
+        return Material(
+            id=f"{tool_id}.{source}",
+            label=f"T{n}: {profile} (load it first)",
+            kind=own.filament_types.get(profile, ""),
+            colour=own.filament_colours.get(profile),
+            profile=profile,
+            raw={**tool.raw, "empty": False, "planned": True, "replaces": tool.label},
+        )
+
     profiles = chosen.profiles
+    if machine and machine != profiles.printer:
+        if machine not in own.printer:
+            raise BadRequest(f"No printer profile {machine[:80]!r} for {chosen.name}")
+        profiles = replace(profiles, printer=machine)
+    if process and process != profiles.process:
+        if process not in own.process:
+            raise BadRequest(f"No process profile {process[:80]!r} for {chosen.name}")
+        profiles = replace(profiles, process=process)
     first: Material | None = None
     if material is not None:
         first = resolve(material)
@@ -270,6 +416,38 @@ def plan_print(
             seen.add(part_id)
             m = resolve(mid)
             extra.append(PartChoice(part_id, part_names[part_id], m, m.profile))
+    tools: tuple[Material, ...] = ()
+    chosen_materials = [m for m in (first, *(p.material for p in extra)) if m is not None]
+    if any(is_tool(m) for m in chosen_materials):
+        if not all(is_tool(m) for m in chosen_materials):
+            raise BadRequest(
+                "Pick changer tools for every part, or filament profiles for every part",
+                "A print can't mix the two",
+            )
+        if own.mmu_printers and profiles.printer not in own.mmu_printers:
+            raise BadRequest(
+                f"The printer profile {profiles.printer!r} doesn't use the filament changer",
+                f"Pick one that does ({', '.join(own.mmu_printers)}), or a filament profile",
+            )
+        # Every tool goes to the slicer, in tool order; one nobody prints from gets the
+        # printer's filament profile when it has none of its own (an empty gate). A tool
+        # the user assigned a filament to holds that one.
+        by_tool = {
+            int(m.raw["tool"]): m if m.profile else replace(m, profile=chosen.profiles.filament)
+            for m in loaded.values()
+            if is_tool(m)
+        }
+        claimed: dict[int, Material] = {}
+        for m in chosen_materials:
+            n = int(m.raw["tool"])
+            if n in claimed and claimed[n].profile != m.profile:
+                raise BadRequest(
+                    f"T{n} can't hold both {claimed[n].profile} and {m.profile}",
+                    "Put the two filaments in different tools",
+                )
+            claimed[n] = m
+            by_tool[n] = m
+        tools = tuple(by_tool[n] for n in sorted(by_tool))
     configured_plate = chosen.extra.get("bed_type")
     return PrintPlan(
         req=req,
@@ -280,13 +458,14 @@ def plan_print(
         profiles=profiles,
         orientation=orientation,
         settings=settings,
-        manual_start=not modules.starts(chosen),
+        manual_start=manual_start,
         target_label=target.spec.label,
         material=first,
         bed_type=check_bed_type(bed_type)
         or (configured_plate if isinstance(configured_plate, str) else None)
         or cfg.default_bed_type,
         extra=tuple(extra),
+        tools=tools,
     )
 
 
@@ -328,6 +507,7 @@ def slice_input(
         bed_type=plan.bed_type,
         media=media,
         extra={"document": plan.document_name, "project": project},
+        tools=plan.tools,
     )
 
 
@@ -384,7 +564,8 @@ def studio_project(
         if MEDIA_GCODE_3MF not in slicer.spec.makes:
             raise ValueError(f"{slicer.spec.label} doesn't make Bambu projects")
         sliced = slicer.slice(job, progress)
-        return with_project_settings(geometry, project_settings_of(sliced.data))
+        settings = project_settings_of(sliced.data)
+        return with_project_settings(geometry, settings, orca_version_of(sliced.data))
     except (ModuleError, ValueError) as e:
         log.warning("opening %s without slicer settings: %s", plan.part_name, e)
         return geometry

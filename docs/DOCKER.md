@@ -8,7 +8,8 @@ Run os2slice on any Linux machine with Docker, no Home Assistant needed. The pie
 | `os2slice` | the Onshape panel and print pages, HTTPS on port 8443 | yes |
 | `duckdns` (profile) | points `<name>.duckdns.org` at this machine's LAN address and keeps its HTTPS certificate in `./certs` | unless you bring your own certificate |
 | `bambustudio-web` (profile) | Bambu Studio in a browser tab on port 3443, one shared session | optional |
-| a slicer sidecar | Bambu Studio or OrcaSlicer as a REST service, for slicing outside BamBuddy | optional; not in this compose file (see "Other printers and slicers") |
+| `orca-slicer-api` (profile `orca`) | OrcaSlicer as a REST service, for slicing outside BamBuddy | optional (see "Other printers and slicers") |
+| `orca-web` (profile `orca-web`) | OrcaSlicer in a browser tab on port 3444, where you keep the profiles os2slice slices with | optional |
 
 Onshape only talks to `https://` pages with a real certificate, so os2slice needs a DNS name and a certificate. The `duckdns` service handles both: the name resolves to the machine's private LAN address, and the certificate comes from Let's Encrypt through a DNS challenge. Nothing is opened to the internet.
 
@@ -77,7 +78,20 @@ The running service picks it up without a restart. What the page keeps, all in t
 - `admin.json`: the password's scrypt hash (0600). Admin sessions live in memory and end on a restart. Run the command again to change the password; delete the file to turn the page off.
 - `secrets.json`: secrets saved on the page (0600). The image has no keyring (`OS2SLICE_ADDON=1`, null keyring backend), so this file is the secret store. It is read before the environment, so a secret saved on the page wins over the same one in `.env`; remove it from the file to go back to `.env`. Pages show secrets only as "set" or "not set".
 
-**Saving config from the page doesn't work with this compose file as shipped.** `docker/config.toml` is mounted read-only (`:ro`), and the page saves by writing a new file and renaming it over the old one, which a single-file bind mount refuses either way (read from the code; not tried in a container). So the page's forms, Migrate included, fail to save there; edit `docker/config.toml` and run `docker compose restart os2slice` instead. Secrets, the password, the checks, **Test connection**, jobs and the log work.
+**Saving config from the page** writes `docker/config.toml` (mounted read-write). Docker mounts it as a single file, which can't be replaced by a rename, so the page rewrites it in place. Edits made on the host with an editor that replaces the file (most do) are only seen after `docker compose restart os2slice`.
+
+**The Onshape panel page** (`/admin/panel`, stored as `[panel]`) sets what the Print panel offers:
+
+- **Open in a slicer, on this computer** (`local_slicer`): `bambu-studio` (default), `orcaslicer` or `none`. The link hands a short-lived download of the selection to that slicer's URL handler (`bambustudio://`, or `orcaslicer://open?file=`).
+- **Open in a slicer, in the browser** (`web_slicer`): one of the sessions set up by `[web_studio]` or `[web_orca]`, `none`, or (left out) every one that is set up.
+- **More settings** (`extra_settings`): chamber temperature, nozzle and bed temperatures, layer height, seam, ironing, … (`src/os2slice/extra_settings.py` has the list). Each one ticked appears in the panel, empty, so the profile's value applies until someone fills it in. Filament settings go into every filament of the print; BamBuddy printers refuse them.
+
+```toml
+[panel]
+local_slicer = "orcaslicer"
+web_slicer = "orcaslicer"
+extra_settings = ["chamber_temperature", "layer_height"]
+```
 
 ## 5. Onshape
 
@@ -88,24 +102,71 @@ Follow [`ONSHAPE_SETUP.md`](ONSHAPE_SETUP.md), with `<host>` = your `hosts` entr
 
 ## Other printers and slicers
 
-os2slice can slice with a Bambu Studio or OrcaSlicer API sidecar instead of BamBuddy, and send to Klipper (Moonraker) or Prusa (PrusaLink) printers ([`MODULES.md`](MODULES.md)). This compose file doesn't run a sidecar. The images exist (`ghcr.io/maziggy/bambu-studio-api`, `ghcr.io/afkfelix/orca-slicer-api`; versions and ports in [`SLICERAPI_API.md`](SLICERAPI_API.md)); run one yourself, or use the one BamBuddy's own compose file starts, and point a slicer entry at it:
+os2slice can slice with a Bambu Studio or OrcaSlicer API sidecar instead of BamBuddy, and send to Klipper (Moonraker) or Prusa (PrusaLink) printers ([`MODULES.md`](MODULES.md)).
+
+The `orca` profile runs an OrcaSlicer sidecar (`ghcr.io/maziggy/orca-slicer-api`, the fork that takes several filaments per slice). It publishes no port; os2slice reaches it on the compose network:
 
 ```toml
-[slicers.studio-api]
-kind = "bambu-studio-api"                  # or "orca-slicer-api"
-url = "http://host.docker.internal:3001"   # the sidecar's published port on this host
+[slicers.orca]
+kind = "orca-slicer-api"
+url = "http://orca-slicer-api:3000"
+profile_dir = "/orca-profiles"             # optional: your own OrcaSlicer profiles
 ```
 
-Then name `studio-api` as the `slicer` of a printer (`[printers.<key>]`) or of a model (`[targets.<key>.models."<model>"]`). Moonraker and PrusaLink targets are built from their API docs and not yet tested on a printer.
+**Your own profiles.** Point `profile_dir` at an OrcaSlicer config folder (the one with `user/` and `system/`), or at one user folder (`user/<id>/`). os2slice then:
+
+- offers your own process and filament profiles in the Print panel (filaments from imported preset bundles in `_local/` included), when the printer's target can't report what's loaded and the printer lists no `materials`;
+- offers your own printer profiles too ("Printer profile" in the panel). A printer profile whose start G-code calls Happy Hare's `MMU_*` macros uses the filament changer: with it, the panel lists the changer's tools (T0, T1, …, from Moonraker's `mmu` object: each gate's material, colour, name and Spoolman spool), each matched to one of your filament profiles of the same type, preferring the spool's vendor in the profile's name. A print from tools loads every tool's filament in tool order, so the G-code's T<n> is the changer's tool n, as in the desktop OrcaSlicer. A filament profile that isn't loaded gets a "Load into" menu: the print is sliced as if it were in that tool, and the job page says what to load before pressing Start ("T1: load 3DO ASA (now …)");
+- uploads each profile resolved against the system presets it inherits, within that preset's own vendor, as the GUI does. A RatRig filament and an Orca Filament Library one get their own base presets, which the sidecar alone can't do (it looks in one folder).
+
+Profiles saved later are used from the next print, with no restart.
+
+The `orca-web` profile runs OrcaSlicer itself in a browser tab, `https://<host>:3444` (user `orca`, password `WEB_ORCA_PASSWORD` in `.env`; the certificate is self-signed). Sign in to your Orca account there, and edit profiles there; os2slice reads its config folder read-only:
+
+```toml
+profile_dir = "/orca-web/.config/OrcaSlicer"
+```
+
+**Open in OrcaSlicer.** With a `[web_orca]` table, the Print panel gets an "Open in OrcaSlicer: in the browser" link beside the Bambu Studio ones. It slices the selection with the printer's slicer (for its settings), drops the project in the shared inbox, and the web OrcaSlicer's own inbox service opens it in the running window (built from `addon/orcaslicer_web`, which reuses the web Bambu Studio's inbox service):
+
+```toml
+[web_orca]
+url = "https://print.example.lan:3444"   # what browsers open
+# inbox = "/share/os2slice/orca-inbox"   # defaults, shared with the orca-web service
+# status = "/share/os2slice/web-orca.json"
+```
+
+To start it with the profiles you already have, copy your desktop's `~/.config/OrcaSlicer/` (`OrcaSlicer.conf`, `system/`, `user/<id>/`; not the token files) into the `orca-web-config` volume under `.config/OrcaSlicer/`, owned by 1000, before its first start. Without a web OrcaSlicer, copy a user folder to `./orca-profiles` and use `profile_dir = "/orca-profiles"` (then `ORCA_VENDOR` must name the vendor its parents come from).
+
+For a Bambu Studio sidecar, run `ghcr.io/maziggy/bambu-studio-api` yourself, or use the one BamBuddy's own compose file starts (versions and ports in [`SLICERAPI_API.md`](SLICERAPI_API.md)), and point a `kind = "bambu-studio-api"` slicer at its URL.
+
+Then name the slicer key as the `slicer` of a printer (`[printers.<key>]`) or of a model (`[targets.<key>.models."<model>"]`). A Klipper printer through Moonraker:
+
+```toml
+[targets.voron]
+kind = "moonraker"
+url = "http://host.docker.internal:7125"   # Moonraker on this host; it must trust Docker's 172.16.0.0/12
+ui_url = "http://voron.lan"                # Mainsail, as browsers reach it
+
+[printers.voron]
+target = "voron"
+slicer = "orca"
+model = "Voron 2.4 350"
+bed_mm = [350, 350]
+profiles = { printer = "My Voron 0.4", process = "0.20mm Mine", filament = "My PLA" }
+bed_type = "High Temp Plate"
+```
+
+PrusaLink targets are built from their API docs and not yet tested on a printer.
 
 ## Day to day
 
 | Task | Command |
 |---|---|
-| Update | `git pull && docker compose --profile web-studio --profile duckdns up -d --build` |
+| Update | `git pull && docker compose --profile web-studio --profile duckdns up -d --build` (add `--profile orca --profile orca-web` if you use them) |
 | Logs | `docker compose logs -f os2slice` (also `bambustudio-web`, `duckdns`) |
 | Check setup | `docker compose exec os2slice os2slice doctor` |
-| Back up | the volumes `os2slice-data` (sign-ins, admin password, page-saved secrets, log) and `bambustudio-config` (Bambu Studio settings), plus `docker/config.toml`, `.env` and `./certs` |
+| Back up | the volumes `os2slice-data` (sign-ins, admin password, page-saved secrets, log), `bambustudio-config` (Bambu Studio settings) and `orca-web-config` (your OrcaSlicer profiles), plus `docker/config.toml`, `.env` and `./certs` |
 
 **Certificate renewal:**
 - `duckdns` renews about 30 days before expiry.

@@ -48,6 +48,10 @@ def test_prepare_renders_a_valid_lan_config(
     assert cfg.server.identity == "lan" and cfg.server.bind == "0.0.0.0"
     assert cfg.server.hosts == ("print.example.duckdns.org:8443",)
     assert cfg.server.tls_cert == Path("/ssl/fullchain.pem")
+    # The redirect port travels by environment, not config.toml: a changed rendering
+    # would make _write_config replace the file and drop the edits made on /admin.
+    assert os.environ["OS2SLICE_REDIRECT_PORT"] == str(addon.REDIRECT_PORT) == "8080"
+    assert cfg.server.redirect_port == 0 and "redirect_port" not in path.read_text()
     # The add-on still writes [bambuddy]; it's read as [targets.bambuddy] (docs/MODULES.md).
     bambuddy = cfg.targets["bambuddy"]
     assert bambuddy.kind == "bambuddy" and bambuddy.values["url"] == "http://172.30.32.1:8000"
@@ -58,6 +62,20 @@ def test_prepare_renders_a_valid_lan_config(
     assert os.environ["XDG_CONFIG_HOME"] == str(tmp_path)
     assert auth.load_keys().access == "acc"  # from the environment, not a file
     assert "acc" not in path.read_text() and "bb_x" not in path.read_text()
+
+
+def test_deprecated_manual_start_is_still_rendered() -> None:
+    """`manual_start` has no effect any more, but render_config keeps writing it: a
+    changed rendering for the same options would replace config.toml and drop the edits
+    made on /admin."""
+    lines = addon.render_config(OPTS).splitlines()
+    assert "manual_start = true" in lines
+    assert "manual_start = false" in addon.render_config({**OPTS, "manual_start": False})
+    unset = {k: v for k, v in OPTS.items() if k != "manual_start"}
+    assert "manual_start = false" in addon.render_config(unset).splitlines()
+    assert addon.render_config(OPTS) == addon.render_config(dict(OPTS))
+    cfg = config.parse(config.tomllib.loads(addon.render_config(OPTS)), Path("c.toml"))
+    assert cfg.targets["bambuddy"].values["manual_start"] is True  # accepted, ignored
 
 
 @pytest.mark.parametrize(
@@ -78,6 +96,8 @@ def test_addon_manifest_matches_the_entry_point() -> None:
     root = Path(__file__).resolve().parent.parent
     manifest = (root / "addon/os2slice/config.yaml").read_text()
     assert "8443/tcp: 8443" in manifest and f"{addon.PORT}/tcp" in manifest
+    assert "8080/tcp: 8444" in manifest and f"{addon.REDIRECT_PORT}/tcp" in manifest
+    assert 'webui: "http://[HOST]:[PORT:8080]/admin"' in manifest
     assert "host_network" not in manifest  # D-12: own network namespace
     secrets_ = {k for mode in addon.SECRET_OPTIONS.values() for k in mode}
     for key in (*secrets_, "onshape_auth", "onshape_oauth_client_id", "hosts", "presets",
@@ -316,7 +336,8 @@ def test_manifest_has_the_config_page_options() -> None:
     manifest = (root / "addon/os2slice/config.yaml").read_text()
     assert "  admin_password: password?" in manifest
     assert "  reset_config: bool" in manifest and "  reset_config: false" in manifest
-    assert 'version: "0.2.0"' in manifest
+    assert 'version: "0.3.5"' in manifest
+    assert "url: https://github.com/jlbimson/os2slice" in manifest
     docs = (root / "addon/os2slice/DOCS.md").read_text()
     for word in ("admin_password", "reset_config", "/admin", "secrets.json"):
         assert word in docs

@@ -120,7 +120,7 @@ def test_targets_and_printers_tables() -> None:
     farm = cfg.targets["farm"]
     assert (farm.kind, farm.values) == (
         "bambuddy",
-        {"url": "http://bb:8000", "folder": "Parts", "manual_start": True},
+        {"url": "http://bb:8000", "folder": "Parts", "manual_start": False},
     )
     a1 = farm.models["A1 Mini"]
     assert a1.slicer == "" and a1.profiles.filament == "Bambu PLA Basic @BBL A1M"
@@ -129,6 +129,25 @@ def test_targets_and_printers_tables() -> None:
     assert over.target is None and over.profiles.filament == "Bambu ASA @BBL X1C"
     assert cfg.default_printer == "A1 Mini" and not hasattr(cfg, "bambuddy")
     assert set(cfg.slicers) == set() and cfg.slicer_modules == {}
+
+
+def test_deprecated_manual_start_true_still_loads() -> None:
+    """`manual_start` has no effect any more (D-33), but old configs keep loading."""
+    cfg = _parse({"targets": {"farm": {**FARM, "manual_start": True}}})
+    assert cfg.targets["farm"].values["manual_start"] is True
+    legacy = _parse({"bambuddy": {"base_url": "http://bb:8000", "manual_start": True}})
+    assert legacy.targets["bambuddy"].values["manual_start"] is True
+
+
+def test_print_default_wait_for_start() -> None:
+    assert _parse({}).default_wait_for_start is False
+    assert _parse({"print_defaults": {"walls": 3}}).default_wait_for_start is False
+    cfg = _parse({"print_defaults": {"wait_for_start": True, "walls": 3}})
+    assert cfg.default_wait_for_start is True and cfg.print_defaults.walls == 3
+    assert config.load().default_wait_for_start is False  # the shipped default
+    for bad in ("yes", 1, "true"):
+        with pytest.raises(ConfigError, match="wait_for_start must be true or false"):
+            _parse({"print_defaults": {"wait_for_start": bad}})
 
 
 def test_a_slicer_module_and_a_desktop_slicer_side_by_side() -> None:
@@ -293,3 +312,32 @@ def test_pairing_checks_media_technology_and_exclusive_modules(
         }
         with pytest.raises(ConfigError, match=message):
             _parse(data)
+
+
+def test_web_orca_table(tmp_path: Path) -> None:
+    cfg = config.parse({"web_orca": {"url": "https://print.lan:3444/"}}, tmp_path / "c")
+    assert cfg.web_orca is not None and cfg.web_orca.url == "https://print.lan:3444"
+    assert cfg.web_orca.inbox == Path("/share/os2slice/orca-inbox")
+    assert cfg.web_orca.status == Path("/share/os2slice/web-orca.json")
+    assert cfg.web_studio is None
+    with pytest.raises(ConfigError, match=r"web_orca\.url must look like https://host:3444"):
+        config.parse({"web_orca": {"url": "http://print.lan:3444"}}, tmp_path / "c")
+
+
+def test_panel_slicer_links(tmp_path: Path) -> None:
+    c = config.parse({}, tmp_path / "c")
+    assert c.panel_local_slicer == "bambu-studio" and c.panel_web_slicers == ()
+    both = {"web_studio": {"url": "https://h:3001"}, "web_orca": {"url": "https://h:3444"}}
+    c = config.parse(both, tmp_path / "c")
+    assert c.panel_web_slicers == ("bambu-studio", "orcaslicer")  # every one set up
+    c = config.parse({**both, "panel": {"local_slicer": "orcaslicer", "web_slicer": "orcaslicer"}},
+                     tmp_path / "c")  # fmt: skip
+    assert c.panel_local_slicer == "orcaslicer" and c.panel_web_slicers == ("orcaslicer",)
+    c = config.parse(
+        {**both, "panel": {"local_slicer": "none", "web_slicer": "none"}}, tmp_path / "c"
+    )
+    assert c.panel_local_slicer == "" and c.panel_web_slicers == ()
+    with pytest.raises(ConfigError, match=r"needs a \[web_orca\] table"):
+        config.parse({"panel": {"web_slicer": "orcaslicer"}}, tmp_path / "c")
+    with pytest.raises(ConfigError, match=r"panel\.local_slicer must be one of"):
+        config.parse({"panel": {"local_slicer": "cura"}}, tmp_path / "c")

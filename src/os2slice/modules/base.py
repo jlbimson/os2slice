@@ -123,6 +123,10 @@ class PrinterInfo:
     # Configured materials ([printers.<key>] materials), for targets that can't report
     # what's loaded; the filament menu falls back to these when status() has none.
     materials: tuple[Material, ...] = ()
+    # A stand-in for "any printer of this model" (BamBuddy's printer pools): the target
+    # picks the printer when the job can run, so its materials say which filament is
+    # wanted, not where it's loaded, and on dual-nozzle models have no nozzle.
+    pool: bool = False
 
 
 @dataclass(frozen=True)
@@ -182,6 +186,10 @@ class SliceInput:
     # a module picks itself (bambu_project.with_tower_retries) goes on top of these.
     process_overrides: Mapping[str, Any] = field(default_factory=dict)
     extra: Mapping[str, Any] = field(default_factory=dict)  # module-specific (document…)
+    # A filament changer's tools in tool order, when the parts print from them: then
+    # filament n is tools[n-1] (every tool, used or not) instead of the n-th distinct
+    # material, so the G-code's T<n> is the changer's tool n.
+    tools: tuple[Material, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -220,6 +228,10 @@ class ProfileCatalog:
     printer: tuple[str, ...] = ()
     process: tuple[str, ...] = ()
     filament: tuple[str, ...] = ()
+    # Optional facts about the profiles, when the slicer can tell (own profiles):
+    filament_types: Mapping[str, str] = field(default_factory=dict)  # "PM ASA" -> "ASA"
+    filament_colours: Mapping[str, str] = field(default_factory=dict)  # "PM ASA" -> "#F2754E"
+    mmu_printers: tuple[str, ...] = ()  # printer profiles that drive a filament changer
 
 
 # ---------------------------------------------------------------------------
@@ -304,4 +316,7 @@ def distinct_materials(parts: tuple[PartGeometry, ...]) -> tuple[Material, ...]:
 # Optional on a target: `ui_url`, a method `(request_host: str = "") -> str` or a plain
 # str attribute: the page where a person watches the queue, for links that belong to no
 # single printer (the panel, job pages).
+# Optional on a target that offers printer pools: `filament_presets(printer) ->
+# tuple[str, ...]`, the filament presets a pool offers besides what is loaded
+# (Modules.pool_presets; BamBuddy: every preset made for the model).
 Factory = Callable[..., Any]
