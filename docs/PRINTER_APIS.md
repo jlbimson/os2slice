@@ -127,3 +127,15 @@ PrusaLink", url=<printer url>)`. `start=True` sends `?1` and reports `started`.
 `OS2SLICE_LIVE_MOONRAKER_KEY`) or `OS2SLICE_LIVE_PRUSALINK_URL` +
 `OS2SLICE_LIVE_PRUSALINK_KEY` set, and `pytest -q -m live`. No test uploads to or
 starts a real printer.
+
+
+## Happy Hare (MMU) through Moonraker
+
+✅ 2026-10-02, joshprint (Kalico, Happy Hare, 5 gates). `GET /printer/objects/query?…&mmu`
+returns Happy Hare's `mmu` object when the printer has one (Moonraker leaves out objects
+Klipper doesn't have). os2slice reads `enabled`, `ttg_map` (tool → gate), and per gate
+`gate_material`, `gate_color` (`RRGGBB` or `RRGGBBAA`), `gate_filament_name`,
+`gate_status` (0 = empty) and `gate_spool_id` (-1 = none). A spool's vendor comes from
+Spoolman through `POST /server/spoolman/proxy` (`/v1/spool/<id>`). Happy Hare's own
+material for a gate wins over its name: gate 1 was named "PolyLite™ ASA Blue" with
+material PETG, and was matched to a PETG profile.

@@ -5,6 +5,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring \
     OS2SLICE_ADDON=1 \
+    OS2SLICE_RUNTIME=docker \
     XDG_CONFIG_HOME=/data \
     XDG_STATE_HOME=/data/state
 COPY pyproject.toml README.md /src/

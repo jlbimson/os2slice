@@ -344,7 +344,17 @@ class SlicerApi:
     def own_profiles(self) -> ProfileCatalog:
         """Only the profiles in `profile_dir`: the choices the print panel offers."""
         users = self._user_profiles()
-        return ProfileCatalog(*(users.names(kind) for kind in ("machine", "process", "filament")))
+        printers, processes, filaments = (
+            users.names(kind) for kind in ("machine", "process", "filament")
+        )
+        return ProfileCatalog(
+            printers,
+            processes,
+            filaments,
+            filament_types={n: t for n in filaments if (t := users.filament_type(n))},
+            filament_colours={n: c for n in filaments if (c := _profile_colour(users, n))},
+            mmu_printers=tuple(n for n in printers if users.is_mmu(n)),
+        )
 
     def _names(self, category: str) -> list[str]:
         body = self._json(self._request("GET", f"/profiles/{category}"), f"{category} list")
@@ -442,7 +452,7 @@ class SlicerApi:
         pinned = job.printer.nozzle_count > 1 and any(
             p.material is not None and p.material.extruder is not None for p in job.parts
         )
-        if len(job.parts) == 1 and job.copies == 1 and not pinned:
+        if len(job.parts) == 1 and job.copies == 1 and not pinned and not job.tools:
             part = job.parts[0]
             stl = part.stl
             if not job.auto_arrange and job.printer.bed_mm:

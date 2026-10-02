@@ -80,7 +80,18 @@ The running service picks it up without a restart. What the page keeps, all in t
 
 **Saving config from the page** writes `docker/config.toml` (mounted read-write). Docker mounts it as a single file, which can't be replaced by a rename, so the page rewrites it in place. Edits made on the host with an editor that replaces the file (most do) are only seen after `docker compose restart os2slice`.
 
-**More settings in the panel.** Print defaults on `/admin` also lists extra slicer settings (chamber temperature, nozzle and bed temperatures, layer height, seam, ironing, …). Each one ticked appears in the Print panel, empty, so the profile's value applies until someone fills it in. They're stored as `[panel] extra_settings = [...]` (`src/os2slice/extra_settings.py` has the list). Filament settings go into every filament of the print; BamBuddy printers refuse them.
+**The Onshape panel page** (`/admin/panel`, stored as `[panel]`) sets what the Print panel offers:
+
+- **Open in a slicer, on this computer** (`local_slicer`): `bambu-studio` (default), `orcaslicer` or `none`. The link hands a short-lived download of the selection to that slicer's URL handler (`bambustudio://`, or `orcaslicer://open?file=`).
+- **Open in a slicer, in the browser** (`web_slicer`): one of the sessions set up by `[web_studio]` or `[web_orca]`, `none`, or (left out) every one that is set up.
+- **More settings** (`extra_settings`): chamber temperature, nozzle and bed temperatures, layer height, seam, ironing, … (`src/os2slice/extra_settings.py` has the list). Each one ticked appears in the panel, empty, so the profile's value applies until someone fills it in. Filament settings go into every filament of the print; BamBuddy printers refuse them.
+
+```toml
+[panel]
+local_slicer = "orcaslicer"
+web_slicer = "orcaslicer"
+extra_settings = ["chamber_temperature", "layer_height"]
+```
 
 ## 5. Onshape
 
@@ -105,6 +116,7 @@ profile_dir = "/orca-profiles"             # optional: your own OrcaSlicer profi
 **Your own profiles.** Point `profile_dir` at an OrcaSlicer config folder (the one with `user/` and `system/`), or at one user folder (`user/<id>/`). os2slice then:
 
 - offers your own process and filament profiles in the Print panel (filaments from imported preset bundles in `_local/` included), when the printer's target can't report what's loaded and the printer lists no `materials`;
+- offers your own printer profiles too ("Printer profile" in the panel). A printer profile whose start G-code calls Happy Hare's `MMU_*` macros uses the filament changer: with it, the panel lists the changer's tools (T0, T1, …, from Moonraker's `mmu` object: each gate's material, colour, name and Spoolman spool), each matched to one of your filament profiles of the same type, preferring the spool's vendor in the profile's name. A print from tools loads every tool's filament in tool order, so the G-code's T<n> is the changer's tool n, as in the desktop OrcaSlicer. A filament profile that isn't loaded gets a "Load into" menu: the print is sliced as if it were in that tool, and the job page says what to load before pressing Start ("T1: load 3DO ASA (now …)");
 - uploads each profile resolved against the system presets it inherits, within that preset's own vendor, as the GUI does. A RatRig filament and an Orca Filament Library one get their own base presets, which the sidecar alone can't do (it looks in one folder).
 
 Profiles saved later are used from the next print, with no restart.

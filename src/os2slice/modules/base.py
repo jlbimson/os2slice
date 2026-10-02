@@ -182,6 +182,10 @@ class SliceInput:
     # a module picks itself (bambu_project.with_tower_retries) goes on top of these.
     process_overrides: Mapping[str, Any] = field(default_factory=dict)
     extra: Mapping[str, Any] = field(default_factory=dict)  # module-specific (document…)
+    # A filament changer's tools in tool order, when the parts print from them: then
+    # filament n is tools[n-1] (every tool, used or not) instead of the n-th distinct
+    # material, so the G-code's T<n> is the changer's tool n.
+    tools: tuple[Material, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -220,6 +224,10 @@ class ProfileCatalog:
     printer: tuple[str, ...] = ()
     process: tuple[str, ...] = ()
     filament: tuple[str, ...] = ()
+    # Optional facts about the profiles, when the slicer can tell (own profiles):
+    filament_types: Mapping[str, str] = field(default_factory=dict)  # "PM ASA" -> "ASA"
+    filament_colours: Mapping[str, str] = field(default_factory=dict)  # "PM ASA" -> "#F2754E"
+    mmu_printers: tuple[str, ...] = ()  # printer profiles that drive a filament changer
 
 
 # ---------------------------------------------------------------------------

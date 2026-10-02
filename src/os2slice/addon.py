@@ -256,6 +256,7 @@ def prepare(
     os.environ["XDG_STATE_HOME"] = str(data / "state")
     os.environ.setdefault("PYTHON_KEYRING_BACKEND", "keyring.backends.null.Keyring")
     os.environ["OS2SLICE_ADDON"] = "1"
+    os.environ["OS2SLICE_RUNTIME"] = "home-assistant"
     _apply_admin_password(password, state / "admin.json", say)
     path = data / "os2slice" / "config.toml"
     _write_config(text, path, bool(opts.get("reset_config")), say)

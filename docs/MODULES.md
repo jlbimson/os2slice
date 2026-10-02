@@ -158,7 +158,8 @@ signing in at `/admin/login`:
   with **Override** to create `[printers."<name>"]`) and `default_printer`. Profile
   fields suggest the names the chosen slicer's `profiles()` returns.
 - **Onshape** (`/admin/onshape`), **Server** (`/admin/server`), **Print defaults**
-  (`/admin/defaults`), **Secrets** (`/admin/secrets`: every `<section>.<key>.<field>`
+  (`/admin/defaults`), **Onshape panel** (`/admin/panel`: the "Open in …" slicers and
+  extra settings, `[panel]`), **Secrets** (`/admin/secrets`: every `<section>.<key>.<field>`
   the config implies, write-only), **Jobs** (`/admin/jobs`), **Log** (`/admin/log`),
   **Password** (`/admin/password`: change it, given the current one); **Sign out** is
   POST `/admin/logout`. The overview `/admin` runs `doctor`'s config, Onshape, secret

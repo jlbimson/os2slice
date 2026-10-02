@@ -662,7 +662,8 @@ def web(cfg: Config, tmp_path) -> Iterator[Running]:
     from os2slice.config import WebStudioConfig
 
     ws = WebStudioConfig("https://bambu.test:3001", tmp_path / "inbox", tmp_path / "status.json")
-    run = Running(dataclasses.replace(cfg, web_studio=ws), FakeBambuddy(job_states=["completed"]))
+    cfg = dataclasses.replace(cfg, web_studio=ws, panel_web_slicers=("bambu-studio",))
+    run = Running(cfg, FakeBambuddy(job_states=["completed"]))
     yield run
     run.httpd.shutdown()
 
@@ -725,7 +726,8 @@ def web_orca(cfg: Config, tmp_path) -> Iterator[Running]:
     from os2slice.config import WebStudioConfig
 
     ws = WebStudioConfig("https://orca.test:3444", tmp_path / "orca-inbox", tmp_path / "orca.json")
-    run = Running(dataclasses.replace(cfg, web_orca=ws), FakeBambuddy(job_states=["completed"]))
+    cfg = dataclasses.replace(cfg, web_orca=ws, panel_web_slicers=("orcaslicer",))
+    run = Running(cfg, FakeBambuddy(job_states=["completed"]))
     yield run
     run.httpd.shutdown()
 
@@ -737,6 +739,7 @@ def test_web_orca_handoff_beside_the_desktop_bambu_link(web_orca: Running) -> No
     ws = web_orca.svc.cfg.web_orca
     r, form = panel_form(web_orca)
     assert 'id="web-orca-link"' in r.text and 'href="https://orca.test:3444"' in r.text
+    assert '<p class="links">Open in OrcaSlicer: <a id="web-orca-link"' in r.text
     assert 'data-label="OrcaSlicer"' in r.text and 'id="web-studio-link"' not in r.text
     assert 'Open in Bambu Studio: <a id="studio-link"' in r.text  # still offered
     h = {"Host": HOST, "Sec-Fetch-Site": "same-origin", "Origin": f"http://{HOST}"}
@@ -820,7 +823,7 @@ def test_panel_extra_settings_reach_the_slicer(cfg: Config) -> None:
                   FakeBambuddy(job_states=["completed"]))  # fmt: skip
     try:
         r, form = panel_form(run)
-        assert '<details class="extras" open><summary>More settings</summary>' in r.text
+        assert '<details class="extras"><summary>More settings</summary>' in r.text  # rolled up
         assert '<select name="x_seam_position"><option value="" selected>From the profile' in r.text
         bad = post_panel(run, {**form, "p": "JHD", "x_layer_height": "5"})
         assert bad.status_code == 400 and run.fake.uploads == []
@@ -833,3 +836,98 @@ def test_panel_extra_settings_reach_the_slicer(cfg: Config) -> None:
         assert overrides["layer_height"] == "0.12" and "seam_position" not in overrides
     finally:
         run.httpd.shutdown()
+
+
+def test_orca_for_both_links_shares_one_line(cfg: Config, tmp_path) -> None:
+    from os2slice.config import WebStudioConfig
+
+    ws = WebStudioConfig("https://orca.test:3444", tmp_path / "in", tmp_path / "s.json")
+    cfg = dataclasses.replace(cfg, web_orca=ws, panel_web_slicers=("orcaslicer",),
+                              panel_local_slicer="orcaslicer")  # fmt: skip
+    links = server._studio_links(cfg)
+    assert links.count('<p class="links">') == 1 and "Bambu" not in links
+    assert links.startswith('<p class="links">Open in OrcaSlicer: <a id="web-orca-link"')
+    assert links.endswith('data-scheme="orcaslicer">on this computer</a></p>')
+
+
+def test_face_part_names_the_part_a_face_belongs_to(srv: Running) -> None:
+    _, form = panel_form(srv)
+    ids = {k: form[k] for k in ("d", "wv", "wvid", "e", "c")}
+    fetch = {"Host": HOST, "Sec-Fetch-Site": "same-origin"}
+    r = srv.http.get("/panel/face-part", params={**ids, "face": "JHG"}, headers=fetch)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"part": "JHD", "name": "Part 1"}
+    assert (
+        srv.http.get("/panel/face-part", params={**ids, "face": "NOPE"}, headers=fetch).status_code
+        == 400
+    )
+    assert (
+        srv.http.get("/panel/face-part", params={**ids, "face": "x'y"}, headers=fetch).status_code
+        == 400
+    )
+    bad = {**ids, "face": "JHG", "evil": "1"}
+    assert srv.http.get("/panel/face-part", params=bad, headers=fetch).status_code == 400
+    cross = {"Host": HOST, "Sec-Fetch-Site": "cross-site"}
+    assert (
+        srv.http.get("/panel/face-part", params={**ids, "face": "JHG"}, headers=cross).status_code
+        == 403
+    )
+
+
+def test_panel_printer_profile_menu_and_changer_tools() -> None:
+    import html as _html
+
+    from os2slice.modules.base import Material, PrinterInfo, Profiles
+    from os2slice.printing import profile_material
+
+    printer = PrinterInfo(
+        "joshprint", "JoshPrint", "fdm", "RatRig V-Core 3 300", "joshprint", "orca",
+        Profiles("JoshPrint 0.5 MMU", "0.2 Strong", "PM ASA"),
+    )  # fmt: skip
+    t0 = Material("t0", "T0: Black (ASA)", "ASA", "#000000", profile="PM ASA", raw={"tool": 0})
+    t4 = Material("t4", "T4: empty", "ASA", "#FF8400", raw={"tool": 4, "empty": True})
+    view = server.PrinterView(
+        printer, "ready", True, (t0, t4, profile_material("PM ASA")), ("0.2 Strong",),
+        ("JoshPrint 0.5", "JoshPrint 0.5 MMU"), ("JoshPrint 0.5 MMU",),
+    )  # fmt: skip
+    html = server._panel_printer_selects([view], "joshprint")
+    menu = re.search(r'<label>Printer profile <select name="machine"[^>]*>(.*?)</select>', html)
+    assert menu, html
+    assert menu.group(1) == (
+        '<option value="" selected data-mmu>JoshPrint 0.5 MMU</option>'
+        '<option value="JoshPrint 0.5">JoshPrint 0.5</option>'
+    )
+    filament = re.search(r'<select name="filament" data-choices="([^"]*)">(.*?)</select>', html)
+    assert '<option value="t0" data-color="#000000" selected>T0: Black (ASA) → PM ASA</option>' in (
+        filament.group(2)
+    )
+    choices = json.loads(_html.unescape(filament.group(1)))["joshprint"]
+    assert [(c["value"], c["tool"], c.get("disabled", False)) for c in choices] == [
+        ("", False, False), ("t0", True, False), ("t4", True, True),
+        (choices[3]["value"], False, False),
+    ]  # fmt: skip
+
+
+def test_selection_carries_the_printer_profile() -> None:
+    form = {"d": DOC, "wv": "w", "wvid": WS, "e": ELEM, "p": "JHD", "printer": "joshprint"}
+    assert server._selection({**form, "machine": "JoshPrint 0.5"}, panel=True)[7] == "JoshPrint 0.5"
+    with pytest.raises(server.BadRequest, match="Invalid printer profile choice"):
+        server._selection({**form, "machine": "a\nb"}, panel=True)
+
+
+def test_load_into_a_tool_makes_a_slot_choice() -> None:
+    assert server._printer_choice("joshprint", "f-0123456789ab", "t2") == (
+        "joshprint", "t2.f-0123456789ab",
+    )  # fmt: skip
+    assert server._printer_choice("joshprint", "", "t2") == ("joshprint", "t2.preset")
+    assert server._printer_choice("joshprint", "t1", "t2") == ("joshprint", "t1")  # a tool already
+    assert server._printer_choice("joshprint", "f-0123456789ab") == ("joshprint", "f-0123456789ab")
+    with pytest.raises(server.BadRequest, match="Invalid tool choice"):
+        server._printer_choice("joshprint", "f-0123456789ab", "gate 2")
+
+
+def test_hidden_beats_the_label_display_rule() -> None:
+    # `label { display:block }` would otherwise keep [hidden] labels ("Load into",
+    # Process, Printer profile) on screen.
+    css = server._layout("t", "", False)
+    assert "label { display:block;" in css and "[hidden] { display:none !important; }" in css

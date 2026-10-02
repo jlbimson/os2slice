@@ -32,6 +32,8 @@ class FakeMoonraker:
     api_key: str | None = None  # when set, requests without it get 401
     fail_with: int | None = None  # every request answers with this status
     print_started: bool = True
+    mmu: dict[str, Any] | None = None  # Happy Hare's "mmu" object (HAPPY_HARE), when fitted
+    spools: dict[int, dict[str, Any]] = field(default_factory=dict)  # Spoolman, by spool id
     requests: list[httpx.Request] = field(default_factory=list)
     uploads: list[dict[str, Any]] = field(default_factory=list)
 
@@ -92,11 +94,18 @@ class FakeMoonraker:
                 "heater_bed": {"temperature": 59.9, "target": 60.0},
                 "toolhead": {"homed_axes": "xyz"},
             }
+            if self.mmu is not None:
+                status["mmu"] = self.mmu
             return httpx.Response(200, json=_wrap({"eventtime": 1.0, "status": status}))
         if path == "/server/spoolman/spool_id":
             return httpx.Response(200, json=_wrap({"spool_id": self.spool_id}))
         if path == "/server/spoolman/proxy" and m == "POST":
             body = json.loads(request.content)
+            wanted = int(body["path"].rsplit("/", 1)[1])
+            if wanted in self.spools:
+                return httpx.Response(
+                    200, json=_wrap({"response": self.spools[wanted], "error": None})
+                )
             if self.spool_v2_error:
                 err = {"status_code": 404, "message": f"No spool with ID {self.spool_id} found."}
                 return httpx.Response(200, json=_wrap({"response": None, "error": err}))
@@ -227,3 +236,25 @@ class FakePrusaLink:
             self.existing.add(where)
             return httpx.Response(201)
         return httpx.Response(404, json={"title": "Not Found", "text": "No such endpoint"})
+
+
+# Happy Hare on a 5-gate MMU, as joshprint's Moonraker reported it (2026-10-02).
+HAPPY_HARE: dict[str, Any] = {
+    "enabled": True,
+    "num_gates": 5,
+    "ttg_map": [0, 1, 2, 3, 4],
+    "gate_status": [1, 1, 1, 1, 0],
+    "gate_material": ["ASA", "PETG", "PETG", "ASA", "ASA"],
+    "gate_color": ["000000", "000000", "00ffffff", "ffffffff", "ff8400"],
+    "gate_filament_name": ["Black", "PolyLite™ ASA Blue", "CR-PETG Transparent", "ASA White",
+                           "Orange ASA"],
+    "gate_spool_id": [7, -1, 8, 10, 9],
+}  # fmt: skip
+HAPPY_HARE_SPOOLS = {
+    7: {"id": 7, "filament": {"name": "Black", "vendor": {"name": "Ambrosia"}, "material": "ASA"}},
+    8: {"id": 8, "filament": {"name": "CR-PETG Transparent", "vendor": {"name": "Creality"},
+                              "material": "PETG"}},
+    9: {"id": 9, "filament": {"name": "Orange ASA", "vendor": {"name": "3DO"}, "material": "ASA"}},
+    10: {"id": 10, "filament": {"name": "ASA White", "vendor": {"name": "Elegoo"},
+                                "material": "ASA"}},
+}  # fmt: skip

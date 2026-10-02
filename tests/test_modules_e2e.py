@@ -598,3 +598,140 @@ def test_bambuddy_refuses_filament_extras_but_takes_process_ones(
         assert bb.uploads == []  # refused before anything went up
         run(cfg, onshape, modules, "A1 Mini", PrintSettings(extras=(("layer_height", "0.16"),)))
     assert bb.slice_bodies[-1]["process_overrides"]["layer_height"] == "0.16"
+
+
+# -- (h) a filament changer's tools (Happy Hare on Moonraker) ------------------------------
+
+
+def mmu_config(tmp_path: Path) -> config.Config:
+    """joshprint: an MMU and a plain printer profile, filaments with their types."""
+    root = tmp_path / "OrcaSlicer"
+    user = root / "user" / "0d1e5a7c"
+    mmu_start = "MMU_START_SETUP INITIAL_TOOL={initial_tool}\nPRINT_WARMUP"
+    for kind, name, body in (
+        ("machine", "JoshPrint 0.5 MMU", {"machine_start_gcode": mmu_start}),
+        ("machine", "JoshPrint 0.5", {"machine_start_gcode": "PRINT_WARMUP\nSTART_PRINT"}),
+        ("process", "0.2 Strong", {"wall_loops": "4"}),
+        ("filament", "PM ASA", {"filament_type": ["ASA"], "default_filament_colour": ["#F2754E"]}),
+        ("filament", "3DO ASA", {"filament_type": ["ASA"]}),
+        ("filament", "3DO PETG", {"filament_type": ["PETG"]}),
+        ("filament", "Creality PETG", {"filament_type": ["PETG"]}),
+    ):
+        (user / kind).mkdir(parents=True, exist_ok=True)
+        (user / kind / f"{name}.json").write_text(json.dumps({"name": name, **body}))
+    return parse(
+        tmp_path,
+        default_printer="joshprint",
+        slicers={
+            "orca": {
+                "kind": "orca-slicer-api",
+                "url": "http://orca.test:3003",
+                "profile_dir": str(root),
+            }
+        },
+        targets={"joshprint": {"kind": "moonraker", "url": MOONRAKER_URL}},
+        printers={
+            "joshprint": {
+                "target": "joshprint",
+                "slicer": "orca",
+                "model": "RatRig V-Core 3 300",
+                "bed_mm": [300, 300],
+                "profiles": {
+                    "printer": "JoshPrint 0.5 MMU",
+                    "process": "0.2 Strong",
+                    "filament": "PM ASA",
+                },
+            }
+        },
+    )
+
+
+def test_changer_tools_are_matched_and_all_loaded_in_tool_order(
+    tmp_path: Path, onshape: OnshapeClient
+) -> None:
+    from tests.fakes_printers import HAPPY_HARE, HAPPY_HARE_SPOOLS
+
+    cfg = mmu_config(tmp_path)
+    klipper, orca = FakeMoonraker(mmu=HAPPY_HARE, spools=HAPPY_HARE_SPOOLS), FakeSidecar("resolver")
+    with Modules.from_config(
+        cfg,
+        secrets=secrets({}),
+        transports={"joshprint": httpx.MockTransport(klipper), "orca": orca.transport()},
+    ) as modules:
+        chosen = modules.find("joshprint")
+        own = modules.own_profiles(chosen)
+        assert own.mmu_printers == ("JoshPrint 0.5 MMU",)
+        assert own.filament_types["Creality PETG"] == "PETG"
+        menu = printing.materials_of(chosen, modules.target_for(chosen).status(chosen), own)
+        tools = [m for m in menu if printing.is_tool(m)]
+        # Vendor first (Creality, 3DO), then the printer's own filament; an empty gate has none.
+        assert [m.profile for m in tools] == ["PM ASA", "3DO PETG", "Creality PETG", "PM ASA", ""]
+        assert [m.label for m in menu[5:]] == ["3DO ASA", "3DO PETG", "Creality PETG", "PM ASA"]
+
+        # One part on T2: every tool goes up, in order, and the part is filament 3.
+        plan = plan_own(cfg, onshape, modules, material="t2")
+        assert [m.id for m in plan.tools] == ["t0", "t1", "t2", "t3", "t4"]
+        assert plan.tools[4].profile == "PM ASA"  # the empty gate: a stand-in profile
+        printing.execute_print(plan, cfg, onshape, modules, queue=True)
+
+        with pytest.raises(BadRequest, match="doesn't use the filament changer"):
+            plan_own(cfg, onshape, modules, material="t0", machine="JoshPrint 0.5")
+        with pytest.raises(BadRequest, match="Pick changer tools for every part"):
+            plan_own(cfg, onshape, modules, material="t0", extra_parts=[("JKD", menu[5].id)])
+        # A filament profile instead: one filament, as before, with the plain printer.
+        plan = plan_own(cfg, onshape, modules, material=menu[6].id, machine="JoshPrint 0.5")
+        assert plan.tools == () and plan.profiles.printer == "JoshPrint 0.5"
+
+    upload = orca.uploads[-1]
+    names = [p.json()["name"] for p in upload if p.name == "filamentProfile"]
+    assert names == ["PM ASA", "3DO PETG", "Creality PETG", "PM ASA", "PM ASA"]
+    colours = [p.json()["filament_colour"] for p in upload if p.name == "filamentProfile"]
+    assert colours == [["#000000"], ["#000000"], ["#00FFFF"], ["#FFFFFF"], ["#FF8400"]]
+    (model,) = [p for p in upload if p.name == "file"]
+    assert model.filename.endswith(".3mf")  # one part, still a project: it names its tool
+    with zipfile.ZipFile(io.BytesIO(model.data)) as z:
+        settings = z.read("Metadata/model_settings.config").decode()
+    assert re.findall(r'key="extruder" value="(\d+)"', settings) == ["3", "3"]
+
+
+def test_a_filament_that_isnt_loaded_goes_into_a_chosen_tool(
+    tmp_path: Path, onshape: OnshapeClient
+) -> None:
+    from tests.fakes_printers import HAPPY_HARE, HAPPY_HARE_SPOOLS
+
+    cfg = mmu_config(tmp_path)
+    klipper, orca = FakeMoonraker(mmu=HAPPY_HARE, spools=HAPPY_HARE_SPOOLS), FakeSidecar("resolver")
+    with Modules.from_config(
+        cfg,
+        secrets=secrets({}),
+        transports={"joshprint": httpx.MockTransport(klipper), "orca": orca.transport()},
+    ) as modules:
+        chosen = modules.find("joshprint")
+        menu = printing.materials_of(
+            chosen, modules.target_for(chosen).status(chosen), modules.own_profiles(chosen)
+        )
+        by_name = {m.label: m.id for m in menu if not printing.is_tool(m)}
+        # 3DO ASA is on no gate: put it in T1 (now PolyLite Blue).
+        plan = plan_own(cfg, onshape, modules, material=f"t1.{by_name['3DO ASA']}")
+        assert [m.profile for m in plan.tools] == [
+            "PM ASA", "3DO ASA", "Creality PETG", "PM ASA", "PM ASA"
+        ]  # fmt: skip
+        assert plan.tools[1].label == "T1: 3DO ASA (load it first)"
+        assert plan.to_load() == ["T1: load 3DO ASA (now T1: PolyLite™ ASA Blue (PETG))"]
+        assert "Before start: T1: load 3DO ASA" in "\n".join(plan.summary_lines())
+        printing.execute_print(plan, cfg, onshape, modules, queue=True)
+        # A filament already in that tool needs no loading.
+        plan = plan_own(cfg, onshape, modules, material=f"t2.{by_name['Creality PETG']}")
+        assert plan.to_load() == [] and plan.material is not None and plan.material.id == "t2"
+        # Two parts can't claim one tool with different filaments.
+        with pytest.raises(BadRequest, match="T2 can't hold both"):
+            plan_own(cfg, onshape, modules, material="t2",
+                     extra_parts=[("JKD", f"t2.{by_name['3DO ASA']}")])  # fmt: skip
+        with pytest.raises(BadRequest, match="has no tool T9"):
+            plan_own(cfg, onshape, modules, material=f"t9.{by_name['3DO ASA']}")
+    names = [p.json()["name"] for p in orca.uploads[0] if p.name == "filamentProfile"]
+    assert names == ["PM ASA", "3DO ASA", "Creality PETG", "PM ASA", "PM ASA"]
+    (model,) = [p for p in orca.uploads[0] if p.name == "file"]
+    with zipfile.ZipFile(io.BytesIO(model.data)) as z:
+        settings = z.read("Metadata/model_settings.config").decode()
+    assert re.findall(r'key="extruder" value="(\d+)"', settings) == ["2", "2"]  # T1

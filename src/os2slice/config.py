@@ -33,6 +33,10 @@ FIX = "Edit {path}"
 # [printers.<key>]: BamBuddy printer names ("A1 Mini", "X1C_01") are keys too, so spaces
 # are allowed; "/" (discovered keys, "<target>/<id>") and "|" (form values) are not.
 PRINTER_KEY_RE = re.compile(r"[A-Za-z0-9_.()+-][A-Za-z0-9 _.()+-]{0,63}")
+# The panel's "Open in …" links: a slicer on the user's own computer (its URL handler), and
+# the shared browser session of each, configured by its table.
+DESKTOP_SLICERS = {"bambu-studio": "Bambu Studio", "orcaslicer": "OrcaSlicer"}
+WEB_SLICER_TABLES = {"bambu-studio": "web_studio", "orcaslicer": "web_orca"}
 TOP_LEVEL = {
     "onshape", "server", "export", "slicers", "targets", "printers", "default_printer",
     "bambuddy", "print_defaults", "web_studio", "web_orca", "panel",
@@ -97,6 +101,10 @@ class Config:
     web_studio: WebStudioConfig | None = None
     web_orca: WebStudioConfig | None = None  # the same for the web OrcaSlicer (orca-web)
     panel_extras: tuple[str, ...] = ()  # [panel] extra_settings: extra_settings.CATALOG keys
+    # [panel] local_slicer: the "on this computer" link's app ("" = no link), and
+    # web_slicer: the browser sessions the panel offers (DESKTOP_SLICERS names).
+    panel_local_slicer: str = "bambu-studio"
+    panel_web_slicers: tuple[str, ...] = ()
     # [onshape] auth: "keys" = one shared API key pair; "oauth" = each user signs in (D-23)
     onshape_auth: str = "keys"
     oauth_client_id: str = ""
@@ -350,8 +358,15 @@ def parse(data: dict[str, Any], path: Path) -> Config:
             raise fail(f"{name}.inbox and .status must be absolute paths")
         return WebStudioConfig(url, inbox_path, status_path)
 
+    web_studio = web_app(
+        "web_studio", 3001, "/share/os2slice/inbox", "/share/os2slice/web-studio.json"
+    )
+    web_orca = web_app(
+        "web_orca", 3444, "/share/os2slice/orca-inbox", "/share/os2slice/web-orca.json"
+    )
+
     panel = table("panel")
-    check_keys("panel", panel, {"extra_settings"})
+    check_keys("panel", panel, {"extra_settings", "local_slicer", "web_slicer"})
     wanted = panel.get("extra_settings", [])
     if not (isinstance(wanted, list) and all(isinstance(k, str) for k in wanted)):
         raise fail("panel.extra_settings must be a list of setting names")
@@ -359,13 +374,22 @@ def parse(data: dict[str, Any], path: Path) -> Config:
         panel_extras = extra_settings.check_keys(wanted)
     except BadRequest as e:
         raise fail(f"panel.extra_settings: {e.message}. {e.fix}") from e
-
-    web_studio = web_app(
-        "web_studio", 3001, "/share/os2slice/inbox", "/share/os2slice/web-studio.json"
-    )
-    web_orca = web_app(
-        "web_orca", 3444, "/share/os2slice/orca-inbox", "/share/os2slice/web-orca.json"
-    )
+    names = ", ".join(f'"{n}"' for n in (*DESKTOP_SLICERS, "none"))
+    local = panel.get("local_slicer", "bambu-studio")
+    if local not in (*DESKTOP_SLICERS, "none"):
+        raise fail(f"panel.local_slicer must be one of {names}")
+    configured_web = {"bambu-studio": web_studio, "orcaslicer": web_orca}
+    web = panel.get("web_slicer")
+    if web is None:  # every browser session that is set up
+        web_slicers = tuple(n for n, ws in configured_web.items() if ws is not None)
+    elif web == "none":
+        web_slicers = ()
+    elif web in DESKTOP_SLICERS:
+        if configured_web[web] is None:
+            raise fail(f'panel.web_slicer = "{web}" needs a [{WEB_SLICER_TABLES[web]}] table')
+        web_slicers = (web,)
+    else:
+        raise fail(f"panel.web_slicer must be one of {names}")
 
     return Config(
         path=path,
@@ -386,6 +410,8 @@ def parse(data: dict[str, Any], path: Path) -> Config:
         web_studio=web_studio,
         web_orca=web_orca,
         panel_extras=panel_extras,
+        panel_local_slicer="" if local == "none" else local,
+        panel_web_slicers=web_slicers,
         onshape_auth=onshape_auth,
         oauth_client_id=oauth_client_id,
         oauth_base_url=oauth_base_url,

@@ -109,6 +109,24 @@ class OrcaProfiles:
     def names(self, kind: str) -> tuple[str, ...]:
         return tuple(sorted(self.users[kind], key=str.casefold))
 
+    def filament_type(self, name: str) -> str:
+        """The resolved filament_type of a user filament profile ("" when unknown)."""
+        body = self.users["filament"].get(name)
+        if body is None:
+            return ""
+        value = self.flatten(body, "filament").get("filament_type")
+        first = value[0] if isinstance(value, list) and value else value
+        return first if isinstance(first, str) else ""
+
+    def is_mmu(self, name: str) -> bool:
+        """A user printer profile whose start G-code drives a filament changer (Happy
+        Hare's MMU_* macros), so its prints use the changer's tools."""
+        body = self.users["machine"].get(name)
+        if body is None:
+            return False
+        start = self.flatten(body, "machine").get("machine_start_gcode")
+        return isinstance(start, str) and "MMU_" in start
+
     def flatten(self, body: dict[str, Any], kind: str) -> dict[str, Any]:
         """`body` with its system parents merged in, as the GUI loads it.
 

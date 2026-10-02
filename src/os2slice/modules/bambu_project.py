@@ -174,8 +174,9 @@ def layout(job: SliceInput, *, tower: tuple[float, float] | None = None) -> Proj
     Parts keep their relative placement (they were oriented and dropped together);
     the assembly, or the grid of its copies, is centred on the printer's bed. Each
     distinct material becomes a filament, pinned to its nozzle on dual-nozzle
-    printers (Material.extruder: 1 = left, 0 = right). Without materials every part
-    is filament 1.
+    printers (Material.extruder: 1 = left, 0 = right); with a filament changer's tools
+    (SliceInput.tools) every tool is a filament, in tool order. Without materials every
+    part is filament 1.
 
     `tower` is the front-left corner of the prime tower the caller will ask the slicer
     for (x, y, mm). It isn't written into the file (the tower position goes to the
@@ -192,7 +193,7 @@ def layout(job: SliceInput, *, tower: tuple[float, float] | None = None) -> Proj
     placed = [translate_xy(p.stl, dx, dy) for p in job.parts]
     gap = COPY_GAP + (BRIM_GAP if job.settings.brim else 0.0)
     offsets = copy_offsets((x1 - x0, y1 - y0), job.copies, (bed_w, bed_d), gap)
-    filaments = distinct_materials(job.parts)
+    filaments = job.tools or distinct_materials(job.parts)
     index = {m.id: n for n, m in enumerate(filaments, start=1)}
     profiles = tuple(m.profile for m in filaments) or (job.profiles.filament,)
     parts = [

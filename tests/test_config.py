@@ -303,3 +303,22 @@ def test_web_orca_table(tmp_path: Path) -> None:
     assert cfg.web_studio is None
     with pytest.raises(ConfigError, match=r"web_orca\.url must look like https://host:3444"):
         config.parse({"web_orca": {"url": "http://print.lan:3444"}}, tmp_path / "c")
+
+
+def test_panel_slicer_links(tmp_path: Path) -> None:
+    c = config.parse({}, tmp_path / "c")
+    assert c.panel_local_slicer == "bambu-studio" and c.panel_web_slicers == ()
+    both = {"web_studio": {"url": "https://h:3001"}, "web_orca": {"url": "https://h:3444"}}
+    c = config.parse(both, tmp_path / "c")
+    assert c.panel_web_slicers == ("bambu-studio", "orcaslicer")  # every one set up
+    c = config.parse({**both, "panel": {"local_slicer": "orcaslicer", "web_slicer": "orcaslicer"}},
+                     tmp_path / "c")  # fmt: skip
+    assert c.panel_local_slicer == "orcaslicer" and c.panel_web_slicers == ("orcaslicer",)
+    c = config.parse(
+        {**both, "panel": {"local_slicer": "none", "web_slicer": "none"}}, tmp_path / "c"
+    )
+    assert c.panel_local_slicer == "" and c.panel_web_slicers == ()
+    with pytest.raises(ConfigError, match=r"needs a \[web_orca\] table"):
+        config.parse({"panel": {"web_slicer": "orcaslicer"}}, tmp_path / "c")
+    with pytest.raises(ConfigError, match=r"panel\.local_slicer must be one of"):
+        config.parse({"panel": {"local_slicer": "cura"}}, tmp_path / "c")

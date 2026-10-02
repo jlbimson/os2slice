@@ -700,27 +700,60 @@ def test_reload_closes_the_replaced_modules_unless_a_job_runs(adm: Admin) -> Non
     assert closed == ["a"]  # a job may still use them; left for the collector
 
 
-def test_extra_panel_settings_are_chosen_on_the_defaults_page(logged: Admin) -> None:
-    page = logged.get("/admin/defaults").text
-    assert "More settings in the Onshape panel" in page
-    assert 'name="extra_chamber_temperature"' in page
-    form = {"walls": "3", "infill": "20", "supports": "off", "top_layers": "5",
-            "bottom_layers": "3", "copies": "1", "bed_type": "",
+def test_onshape_panel_page_sets_links_and_extra_settings(logged: Admin) -> None:
+    page = logged.get("/admin/panel").text
+    assert 'name="local_slicer"' in page and 'name="extra_chamber_temperature"' in page
+    # Only browser sessions that are set up can be chosen; the rest are named as missing.
+    web = re.search(r'<select name="web_slicer">(.*?)</select>', page).group(1)
+    assert 'value="orcaslicer"' not in web and "Not set up here:" in page
+    form = {"local_slicer": "orcaslicer", "web_slicer": "none",
             "extra_chamber_temperature": "on", "extra_layer_height": "on"}  # fmt: skip
-    r = logged.submit("/admin/defaults", "/admin/defaults", form)
+    r = logged.submit("/admin/panel", "/admin/panel", form)
     assert r.status_code == 303, r.text
     saved = tomllib.loads(logged.path.read_text())
-    assert saved["panel"] == {"extra_settings": ["chamber_temperature", "layer_height"]}
-    assert saved["print_defaults"]["infill"] == 20
-    # The running service has them at once: the panel shows the fields, empty.
-    assert logged.svc.cfg.panel_extras == ("chamber_temperature", "layer_height")
-    fields = server._extra_fields(logged.svc.cfg)
+    assert saved["panel"] == {
+        "local_slicer": "orcaslicer",
+        "web_slicer": "none",
+        "extra_settings": ["chamber_temperature", "layer_height"],
+    }
+    # The running service has them at once.
+    cfg = logged.svc.cfg
+    assert cfg.panel_extras == ("chamber_temperature", "layer_height")
+    assert cfg.panel_local_slicer == "orcaslicer" and cfg.panel_web_slicers == ()
+    links = server._studio_links(cfg)
+    assert links == (
+        '<p class="links">Open in OrcaSlicer: <a id="studio-link" class="off" href="#" '
+        'data-scheme="orcaslicer">on this computer</a></p>'
+    )
+    fields = server._extra_fields(cfg)
     assert 'name="x_chamber_temperature" min="0" max="100" step="1"' in fields
     assert 'placeholder="From the profile"' in fields
-    assert re.search(r'checked[^>]*>\s*Chamber temperature|extra_chamber_temperature"[^>]*checked',
-                     logged.get("/admin/defaults").text)  # fmt: skip
-    # Unticking them all removes the table.
-    form = {k: v for k, v in form.items() if not k.startswith("extra_")}
-    assert logged.submit("/admin/defaults", "/admin/defaults", form).status_code == 303
-    assert "panel" not in tomllib.loads(logged.path.read_text())
-    assert server._extra_fields(logged.svc.cfg) == ""
+    # A browser slicer that isn't set up is refused, and nothing is written.
+    before = logged.path.read_bytes()
+    r = logged.submit(
+        "/admin/panel", "/admin/panel", {"local_slicer": "none", "web_slicer": "orcaslicer"}
+    )
+    assert r.status_code == 400 and "needs a [web_orca] table" in r.text
+    assert logged.path.read_bytes() == before
+    # No local slicer and no extras: no links, no fields.
+    r = logged.submit("/admin/panel", "/admin/panel", {"local_slicer": "none", "web_slicer": ""})
+    assert r.status_code == 303
+    assert tomllib.loads(logged.path.read_text())["panel"] == {"local_slicer": "none"}
+    assert server._studio_links(logged.svc.cfg) == "" and server._extra_fields(logged.svc.cfg) == ""
+
+
+@pytest.mark.parametrize(
+    ("value", "shown", "hidden"),
+    [
+        ("docker", "Running in Docker", "Home Assistant"),
+        ("home-assistant", "Running as the Home Assistant add-on", "Running in Docker"),
+        ("", "", '<div class="msg">Running'),
+    ],
+)
+def test_runtime_note(
+    logged: Admin, monkeypatch: pytest.MonkeyPatch, value: str, shown: str, hidden: str
+) -> None:
+    monkeypatch.setenv("OS2SLICE_ADDON", "1" if value else "")
+    monkeypatch.setenv("OS2SLICE_RUNTIME", value)
+    page = logged.get("/admin").text
+    assert shown in page and hidden not in page

@@ -47,6 +47,7 @@ from os2slice.logsetup import log_path
 from os2slice.modules import registry
 from os2slice.modules.base import Field, ModuleSpec, ProfileCatalog
 from os2slice.request import SLICER_KEY_RE
+from os2slice.runtime import DOCKER, HOME_ASSISTANT, runtime
 from os2slice.settings import (
     BED_TYPES,
     COPIES_RANGE,
@@ -87,6 +88,7 @@ SECTIONS = (
     ("/admin/onshape", "Onshape"),
     ("/admin/server", "Server"),
     ("/admin/defaults", "Print defaults"),
+    ("/admin/panel", "Onshape panel"),
     ("/admin/jobs", "Jobs"),
     ("/admin/log", "Log"),
     ("/admin/secrets", "Secrets"),
@@ -332,7 +334,8 @@ def _chrome(ctx: Ctx, here: str) -> str:
     )
     logout = ctx.form("/admin/logout", "", "Sign out", cls="small")
     notes = "".join(f'<div class="msg">{_e(n)}</div>' for n in _restart_notes(ctx.svc))
-    if _addon():
+    where = runtime()
+    if where == HOME_ASSISTANT:
         notes += (
             '<div class="msg">Running as the Home Assistant add-on: changes made here '
             "persist across restarts until the options on the add-on's Configuration tab "
@@ -340,16 +343,17 @@ def _chrome(ctx: Ctx, here: str) -> str:
             "Secrets saved here are used while the matching option on that tab is empty; "
             "a filled-in option replaces them at the next start.</div>"
         )
+    elif where == DOCKER:
+        notes += (
+            '<div class="msg">Running in Docker: changes made here are written to '
+            "docker/config.toml on the host (comments aren't kept). Secrets saved here go to "
+            "the os2slice-data volume and win over the same ones in .env. After editing "
+            "config.toml on the host, run docker compose restart os2slice.</div>"
+        )
     return (
         f'{CSS}<nav class="admin">{links} {logout}</nav>'
         f'<p class="file">Editing {_e(ctx.svc.cfg.path)}</p>{notes}'
     )
-
-
-def _addon() -> bool:
-    from os2slice import cli
-
-    return cli.ADDON
 
 
 def _restart_notes(svc: Service) -> list[str]:
@@ -1610,7 +1614,7 @@ PRINT_SETTING_NAMES = {
 }  # fmt: skip
 DEFAULT_NAMES = {
     "walls", "infill", "supports", "build_plate_only", "top_layers", "bottom_layers", "brim",
-    "copies", "bed_type", *(f"extra_{key}" for key in extra_settings.BY_KEY),
+    "copies", "bed_type",
 }  # fmt: skip
 
 
@@ -1626,7 +1630,6 @@ def _defaults_vals(cfg: config.Config) -> dict[str, str]:
         "brim": "on" if p.brim else "",
         "copies": str(p.copies),
         "bed_type": cfg.default_bed_type or "",
-        **{f"extra_{key}": "on" for key in cfg.panel_extras},
     }
 
 
@@ -1649,16 +1652,6 @@ def _get_defaults(ctx: Ctx, params: dict[str, str], vals: Mapping[str, str] | No
         + num("copies", "Copies", COPIES_RANGE)
         + _select("bed_type", "Build plate", _plate_choices(), v.get("bed_type", ""),
                   "a printer's or model's own plate wins")
-        + "<h2>More settings in the Onshape panel</h2>"
-        + "<p class=muted>Each one ticked here appears in the panel, empty: the profile's own "
-          "value applies until someone fills it in. Filament settings go into every filament "
-          "of the print; BamBuddy printers can't take them.</p>"
-        + "".join(
-            _check(f"extra_{s.key}", f"{s.label}{f' ({s.unit})' if s.unit else ''}",
-                   bool(v.get(f"extra_{s.key}")),
-                   f"{s.scope} setting {s.key}" + (f"; {s.help}" if s.help else ""))
-            for s in extra_settings.CATALOG
-        )
     )  # fmt: skip
     body = (
         _saved(params) + _msg(error, "bad")
@@ -1692,22 +1685,89 @@ def _post_defaults(ctx: Ctx, form: dict[str, str]) -> None:
             if vals["bed_type"]:
                 tbl["bed_type"] = vals["bed_type"]
             data["print_defaults"] = tbl
-            chosen = [s.key for s in extra_settings.CATALOG if vals.get(f"extra_{s.key}")]
-            panel = dict(data.get("panel") or {})
-            if chosen:
-                panel["extra_settings"] = chosen
-            else:
-                panel.pop("extra_settings", None)
-            if panel:
-                data["panel"] = panel
-            else:
-                data.pop("panel", None)
 
         _save(ctx.svc, mutate, "print_defaults")
     except Invalid as e:
         _get_defaults(ctx, {}, vals, e.message, 400)
         return
     ctx.redirect("/admin/defaults?saved=1")
+
+
+# ---------------------------------------------------------------------------
+# The Onshape panel: its "Open in …" links and extra settings ([panel])
+
+PANEL_NAMES = {"local_slicer", "web_slicer", *(f"extra_{key}" for key in extra_settings.BY_KEY)}
+
+
+def _panel_vals(cfg: config.Config, raw: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        "local_slicer": cfg.panel_local_slicer or "none",
+        "web_slicer": str(raw.get("web_slicer", "")),
+        **{f"extra_{key}": "on" for key in cfg.panel_extras},
+    }
+
+
+def _get_panel_settings(ctx: Ctx, params: dict[str, str], vals: Mapping[str, str] | None = None,
+                        error: str = "", status: int = 200) -> None:  # fmt: skip
+    cfg = ctx.svc.file_cfg
+    v = vals or _panel_vals(cfg, _table(_raw(ctx.svc), "panel"))
+    local = [(name, label) for name, label in config.DESKTOP_SLICERS.items()] + [("none", "None")]
+    web: list[tuple[str, str]] = [("", "Every one that is set up")]
+    missing = []
+    for name, label in config.DESKTOP_SLICERS.items():
+        ws = getattr(cfg, config.WEB_SLICER_TABLES[name])
+        if ws is None:
+            missing.append(f"{label} ([{config.WEB_SLICER_TABLES[name]}])")
+        else:
+            web.append((name, f"{label}, {ws.url}"))
+    web.append(("none", "None"))
+    note = f"Not set up here: {', '.join(missing)}." if missing else ""
+    inner = (
+        "<h2>Open in a slicer</h2>"
+        + _select("local_slicer", "On this computer", local, v.get("local_slicer", ""),
+                  "the slicer installed on each user's own computer; the link uses its URL "
+                  "handler")
+        + _select("web_slicer", "In the browser", web, v.get("web_slicer", ""),
+                  f"the shared slicer session(s) on this server. {note}".strip())
+        + "<h2>More settings</h2>"
+        + "<p class=muted>Each one ticked appears in the panel, empty: the profile's own value "
+          "applies until someone fills it in. Filament settings go into every filament of the "
+          "print; BamBuddy printers can't take them.</p>"
+        + "".join(
+            _check(f"extra_{x.key}", f"{x.label}{f' ({x.unit})' if x.unit else ''}",
+                   bool(v.get(f"extra_{x.key}")),
+                   f"{x.scope} setting {x.key}" + (f"; {x.help}" if x.help else ""))
+            for x in extra_settings.CATALOG
+        )
+    )  # fmt: skip
+    body = _saved(params) + _msg(error, "bad") + ctx.form("/admin/panel", inner)
+    ctx.page("Onshape panel", body, status, "/admin/panel")
+
+
+def _post_panel_settings(ctx: Ctx, form: dict[str, str]) -> None:
+    _expect(form, PANEL_NAMES)
+    vals = {k: form.get(k, "") for k in PANEL_NAMES}
+    try:
+
+        def mutate(data: dict[str, Any]) -> None:
+            panel = dict(data.get("panel") or {})
+            panel["local_slicer"] = vals["local_slicer"] or "bambu-studio"
+            if vals["web_slicer"]:
+                panel["web_slicer"] = vals["web_slicer"]
+            else:
+                panel.pop("web_slicer", None)
+            chosen = [x.key for x in extra_settings.CATALOG if vals.get(f"extra_{x.key}")]
+            if chosen:
+                panel["extra_settings"] = chosen
+            else:
+                panel.pop("extra_settings", None)
+            data["panel"] = panel
+
+        _save(ctx.svc, mutate, "panel")
+    except Invalid as e:
+        _get_panel_settings(ctx, {}, vals, e.message, 400)
+        return
+    ctx.redirect("/admin/panel?saved=1")
 
 
 # ---------------------------------------------------------------------------
@@ -1864,6 +1924,7 @@ GET_ROUTES: dict[str, tuple[Get, tuple[str, ...]]] = {
     "/admin/onshape": (_get_onshape, SAVED),
     "/admin/server": (_get_server, SAVED),
     "/admin/defaults": (_get_defaults, SAVED),
+    "/admin/panel": (_get_panel_settings, SAVED),
     "/admin/jobs": (_get_jobs, ()),
     "/admin/log": (_get_log, ()),
     "/admin/secrets": (_get_secrets, SAVED),
@@ -1883,5 +1944,6 @@ POST_ROUTES: dict[str, Post] = {
     "/admin/onshape": _post_onshape,
     "/admin/server": _post_server,
     "/admin/defaults": _post_defaults,
+    "/admin/panel": _post_panel_settings,
     "/admin/secrets": _post_secrets,
 }

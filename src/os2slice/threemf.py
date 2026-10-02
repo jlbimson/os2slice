@@ -174,14 +174,21 @@ def build_3mf(
 PROJECT_SETTINGS = "Metadata/project_settings.config"
 APP_RE = re.compile(r'(<metadata name="Application">)[^<]*(</metadata>)')
 VERSION_RE = re.compile(r"\d{2}\.\d{2}\.\d{2}\.\d{2}")
+# OrcaSlicer marks its own 3MFs with this tag next to the Application one (2.3.2 on); a
+# file without it opens with "The 3MF was created by BambuStudio".
+ORCA_RE = re.compile(r'<metadata name="OrcaSlicer">([0-9A-Za-z.+-]{1,40})</metadata>')
 
 
-def with_project_settings(threemf: bytes, project_settings: bytes) -> bytes:
+def with_project_settings(
+    threemf: bytes, project_settings: bytes, orca_version: str | None = None
+) -> bytes:
     """Add Bambu Studio project settings (printer, filament and process presets) to a 3MF.
 
     Bambu Studio loads a 3MF's settings only when its Application metadata starts with
     "BambuStudio-" (else: "The 3mf is not from Bambu Lab, load geometry data only"), so
-    the file is labelled with the Bambu Studio version that wrote the settings.
+    the file is labelled with the Bambu Studio version that wrote the settings. Settings
+    from OrcaSlicer (`orca_version`, see orca_version_of) also get OrcaSlicer's own tag, as
+    OrcaSlicer writes it, so it opens them as its own project.
     """
     try:
         version = str(json.loads(project_settings).get("version", ""))
@@ -195,11 +202,25 @@ def with_project_settings(threemf: bytes, project_settings: bytes) -> bytes:
         for info in src.infolist():
             data = src.read(info.filename)
             if info.filename == "3D/3dmodel.model":
-                data = APP_RE.sub(rf"\g<1>BambuStudio-{version}\g<2>", data.decode(), 1).encode()
+                tag = rf"\g<1>BambuStudio-{version}\g<2>"
+                if orca_version:
+                    tag += f'\n <metadata name="OrcaSlicer">{orca_version}</metadata>'
+                data = APP_RE.sub(tag, data.decode(), 1).encode()
             if info.filename != PROJECT_SETTINGS:
                 z.writestr(info.filename, data)
         z.writestr(PROJECT_SETTINGS, project_settings)
     return buf.getvalue()
+
+
+def orca_version_of(threemf: bytes) -> str | None:
+    """The OrcaSlicer version that wrote a 3MF (its "OrcaSlicer" tag), else None."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(threemf)) as z:
+            model = z.read("3D/3dmodel.model").decode(errors="replace")
+    except (zipfile.BadZipFile, KeyError):
+        return None
+    m = ORCA_RE.search(model)
+    return m.group(1) if m else None
 
 
 def project_settings_of(threemf: bytes) -> bytes:
