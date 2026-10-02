@@ -167,9 +167,6 @@ class Modules:
     targets: dict[str, Any] = field(default_factory=dict)
     configured: dict[str, PrinterConfig] = field(default_factory=dict)
     default_printer: str = ""
-    # By target key: the default of the Wait for Start toggle (`manual_start`; a target
-    # without that setting, like Moonraker, defaults to waiting).
-    manual_start: dict[str, bool] = field(default_factory=dict)
 
     @classmethod
     def from_config(
@@ -195,7 +192,6 @@ class Modules:
             }
             module = build_target(t.kind, values, key=key, transport=per_key.get(key, transport))
             mods.targets[key] = module
-            mods.manual_start[key] = bool(t.values.get("manual_start", True))
             if spec.role == "both":
                 mods.slicers[key] = module
         for key, s in cfg.slicer_modules.items():
@@ -293,16 +289,6 @@ class Modules:
         except ModuleError as e:
             log.warning("%s: filament presets unreadable: %s", printer.target, e.one_line())
             return ()
-
-    def waits(self, printer: PrinterInfo) -> bool:
-        """The default of the Wait for Start toggle for this printer: its target's
-        `manual_start` (the person printing chooses per print, D-13)."""
-        return self.manual_start.get(printer.target, True)
-
-    def waits_by_default(self) -> bool:
-        """The page's and panel's Wait for Start default: on when any target is set to
-        wait, so a mixed setup errs on the side of waiting."""
-        return any(self.manual_start.values())
 
     def ui_links(self, request_host: str = "") -> list[tuple[str, str]]:
         """(label, url) of each target's own UI that has one, for the panel and job pages."""

@@ -50,7 +50,7 @@ argv = ["flatpak", "run", "--file-forwarding", "com.prusa3d.PrusaSlicer", "--sin
 base_url = "http://homeassistant:8000"   # on the NUC itself: http://127.0.0.1:8000
 folder = "Onshape"                       # library folder; one subfolder per document
 default_printer = "A1 Mini"              # BamBuddy printer name
-manual_start = false                     # default of the Wait for Start toggle (D-13)
+manual_start = false                     # deprecated, no effect: Wait for Start is per print
 
 # Slicer presets per BamBuddy printer *model* (GET /api/v1/slicer/presets lists names).
 [bambuddy.presets."A1 Mini"]
@@ -115,7 +115,6 @@ bed_type = "High Temp Plate"   # smooth PEI; per-model [bambuddy.presets.*] bed_
 # kind = "bambuddy"
 # url = "http://homeassistant:8000"
 # folder = "Onshape"
-# manual_start = false             # default of the Wait for Start toggle
 # # api key: secret store entry "targets.bambuddy.api_key"
 #
 # [targets.bambuddy.models."A1 Mini"]   # defaults for discovered printers of this model

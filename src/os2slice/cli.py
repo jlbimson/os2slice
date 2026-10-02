@@ -105,9 +105,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pr.add_argument(
         "--wait-for-start",
-        action=argparse.BooleanOptionalAction,
+        action="store_true",
         help="leave the queued print waiting until someone presses Start (default: the "
-        "target's manual_start setting, which is off: the print starts by itself)",
+        "print starts by itself once the printer is free)",
     )
     pr.set_defaults(func=cmd_print)
 

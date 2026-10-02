@@ -64,6 +64,20 @@ def test_prepare_renders_a_valid_lan_config(
     assert "acc" not in path.read_text() and "bb_x" not in path.read_text()
 
 
+def test_deprecated_manual_start_is_still_rendered() -> None:
+    """`manual_start` has no effect any more, but render_config keeps writing it: a
+    changed rendering for the same options would replace config.toml and drop the edits
+    made on /admin."""
+    lines = addon.render_config(OPTS).splitlines()
+    assert "manual_start = true" in lines
+    assert "manual_start = false" in addon.render_config({**OPTS, "manual_start": False})
+    unset = {k: v for k, v in OPTS.items() if k != "manual_start"}
+    assert "manual_start = false" in addon.render_config(unset).splitlines()
+    assert addon.render_config(OPTS) == addon.render_config(dict(OPTS))
+    cfg = config.parse(config.tomllib.loads(addon.render_config(OPTS)), Path("c.toml"))
+    assert cfg.targets["bambuddy"].values["manual_start"] is True  # accepted, ignored
+
+
 @pytest.mark.parametrize(
     "missing", ["onshape_access_key", "onshape_secret_key", "bambuddy_api_key"]
 )

@@ -76,6 +76,7 @@ def run(
     modules: Modules,
     printer: str,
     settings: PrintSettings | None = None,
+    wait: bool = False,
 ) -> tuple[printing.PrintPlan, printing.PrintOutcome]:
     req = parse_onshape_url(URL, "e2e", ["e2e"], "JHD")
     plan = printing.plan_print(
@@ -86,6 +87,7 @@ def run(
         printer,
         Orientation.parse("as-modeled"),
         settings or PrintSettings(3, 25),
+        manual_start=wait,
     )
     steps: list[str] = []
     outcome = printing.execute_print(plan, cfg, onshape, modules, queue=True, progress=steps.append)
@@ -172,7 +174,7 @@ def test_orca_sidecar_to_moonraker_uploads_gcode_and_waits(
         secrets=secrets({}),
         transports={"voron": httpx.MockTransport(voron), "orca-api": orca.transport()},
     ) as modules:
-        plan, out = run(cfg, onshape, modules, "voron")
+        plan, out = run(cfg, onshape, modules, "voron", wait=True)  # Wait for Start ticked
         # Moonraker can't tell what's loaded: the menu falls back to the configured list.
         assert [m.label for m in printing.materials_of(plan.printer, plan.status)] == [
             "PLA black",
@@ -212,7 +214,7 @@ def test_orca_sidecar_to_prusalink_puts_without_printing(
         secrets=secrets({"targets.mk4.api_key": "secret-key"}),
         transports={"mk4": httpx.MockTransport(mk4), "orca-api": orca.transport()},
     ) as modules:
-        plan, out = run(cfg, onshape, modules, "MK4")
+        plan, out = run(cfg, onshape, modules, "MK4", wait=True)  # Wait for Start ticked
     assert plan.printer.extra["nozzle_diameter"] == 0.4  # filled in from the printer
     assert out.slice.media == "gcode"
     (put,) = mk4.uploads

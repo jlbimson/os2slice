@@ -131,7 +131,7 @@ def test_modules_from_a_legacy_config(cfg) -> None:  # type: ignore[no-untyped-d
     with pytest.raises(BadRequest, match="No active printer"):
         mods.find("Old", printers)
     a1 = mods.find("A1 Mini", printers)
-    assert mods.slicer_for(a1) is mods.target_for(a1) and not mods.waits(a1)
+    assert mods.slicer_for(a1) is mods.target_for(a1)
     assert mods.ui_links("localhost:8765") == [("BamBuddy", "http://localhost:8000/queue")]
     with pytest.raises(AuthError):
         registry.Modules.from_config(cfg, secrets=lambda n: None)
