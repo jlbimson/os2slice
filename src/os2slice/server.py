@@ -39,6 +39,7 @@ from os2slice.auth import get_secret
 from os2slice.config import DESKTOP_SLICERS, Config, WebStudioConfig
 from os2slice.config import load as load_config
 from os2slice.errors import AuthError, BadRequest, ConfigError, Os2sliceError
+from os2slice.filament_icons import SELECTED_BUTTON, option_content
 from os2slice.jobs import CsrfTokens, Job, JobStore
 from os2slice.modules import bambu_project
 from os2slice.modules.base import Material, PrinterInfo, PrinterStatus
@@ -1309,20 +1310,21 @@ def _printer_select(views: list[PrinterView], default_printer: str) -> str:
             continue
         name, key = v.printer.name, v.printer.key
         preset_label = v.printer.profiles.filament.split(" @")[0]
-        opts = []
+        opts: list[tuple[str, str, str, bool, str]] = []  # value, label, colour, disabled, icon
         for m in _menu_order(v):
             if m is None:
-                opts.append((key, f"{name} · preset filament ({preset_label})", "", False))
+                opts.append((key, f"{name} · preset filament ({preset_label})", "", False, ""))
                 continue
             label, disabled = _material_label(m, v.printer)
-            opts.append((f"{key}|{m.id}", f"{name} · {label}", m.colour or "", disabled))
+            icon = "" if m.raw.get("empty") else m.colour or ""  # an empty gate: no filament
+            opts.append((f"{key}|{m.id}", f"{name} · {label}", m.colour or "", disabled, icon))
         html_opts = "".join(
             f'<option value="{_e(val)}"'
             + (f' data-color="{_e(color)}"' if color else "")
             + (" disabled" if disabled else "")
             + (" selected" if val == selected and not disabled else "")
-            + f">{_e(label)}</option>"
-            for val, label, color, disabled in opts
+            + f">{option_content(label, icon)}</option>"
+            for val, label, color, disabled, icon in opts
         )
         groups.append(
             f'<optgroup label="{_e(f"{name} ({v.printer.model}), {v.state}")}">'
@@ -1334,7 +1336,8 @@ def _printer_select(views: list[PrinterView], default_printer: str) -> str:
         else ""
     )
     return (
-        f'<label>Printer and filament <select name="printer" required>{"".join(groups)}'
+        '<label>Printer and filament <select name="printer" class="fc" required>'
+        f"{SELECTED_BUTTON}{''.join(groups)}"
         f"</select></label>{note}"
     )
 
@@ -1443,7 +1446,7 @@ def _panel_printer_selects(views: list[PrinterView], default_printer: str) -> st
         + (f' data-color="{_e(c["color"])}"' if c.get("color") else "")
         + (" disabled" if c.get("disabled") else "")
         + (" selected" if c["default"] else "")
-        + f">{_e(c['label'])}</option>"
+        + f">{option_content(c['label'], '' if c.get('empty') else c.get('color'))}</option>"
         for c in (choices[first.printer.key] if first else [])
     )
     note = (
@@ -1466,9 +1469,10 @@ def _panel_printer_selects(views: list[PrinterView], default_printer: str) -> st
         f"<label{'' if machine_options else ' hidden'}>Printer profile "
         f'<select name="machine" data-choices="{_e(json.dumps(machines))}">'
         f"{machine_options}</select></label>"
-        f'<label>Filament <select name="filament" data-choices="{_e(json.dumps(choices))}">'
-        f"{filaments}</select></label>"
-        '<label id="tool-slot" hidden>Load into <select name="filament_tool"></select></label>'
+        f'<label>Filament <select name="filament" class="fc" '
+        f'data-choices="{_e(json.dumps(choices))}">{SELECTED_BUTTON}{filaments}</select></label>'
+        '<label id="tool-slot" hidden>Load into <select name="filament_tool" class="fc">'
+        f"{SELECTED_BUTTON}</select></label>"
         f"<label{'' if process_options else ' hidden'}>Process "
         f'<select name="process" data-choices="{_e(json.dumps(processes))}">'
         f"{process_options}</select></label>{note}"
@@ -1651,4 +1655,19 @@ button {{ margin-top:1rem; width:100%; padding:.65rem; font-size:1rem; border:0;
 .preview canvas {{ display:block; width:100%; height:100%; touch-action:none; }}
 #preview-note {{ position:absolute; left:.5rem; bottom:.3rem; margin:0; pointer-events:none; }}
 button:disabled {{ opacity:.45; cursor:default; }} a {{ color:var(--accent); }}
+/* Filament menus (select.fc, filament_icons.py): the option text starts with a coloured
+   emoji; with customizable selects, an exact-colour swatch replaces it. */
+@supports (appearance: base-select) {{
+  select.fc, select.fc::picker(select) {{ appearance:base-select; }}
+  select.fc {{ display:flex; align-items:center; gap:.3rem; }}
+  select.fc > button {{ all:unset; flex:1; min-width:0; }}
+  select.fc selectedcontent {{ display:block; overflow:hidden; white-space:nowrap;
+    text-overflow:ellipsis; }}
+  select.fc::picker(select) {{ background:var(--bg); color:var(--fg);
+    border:1px solid var(--line); border-radius:6px; }}
+  select.fc .fc-emoji {{ display:none; }}
+  select.fc .fc-swatch {{ display:inline-block; width:.85em; height:.85em; margin-right:.45em;
+    vertical-align:-.08em; border-radius:3px; box-sizing:border-box;
+    border:1px solid color-mix(in srgb, var(--fg) 40%, transparent); }}
+}}
 </style></head><body><h1>{_e(title)}</h1>{body}</body></html>"""

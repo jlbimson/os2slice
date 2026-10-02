@@ -212,7 +212,7 @@ def test_panel_offers_and_posts_a_pool_preset(cfg: config.Config) -> None:
     run = Running(cfg, FakeBambuddy(job_states=["completed"]))
     try:
         r, form = panel_form(run)
-        menu = re.search(r'<select name="filament" data-choices="([^"]*)"', r.text)
+        menu = re.search(r'<select name="filament" class="fc" data-choices="([^"]*)"', r.text)
         assert menu, r.text
         pool_menu = json.loads(html.unescape(menu.group(1)))["bambuddy/any:A1 Mini"]
         assert [c["label"] for c in pool_menu] == [

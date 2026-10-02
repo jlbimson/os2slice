@@ -28,7 +28,12 @@ const slotLabel = d.getElementById("tool-slot");
 
 const shown = (el) => w.getComputedStyle(el).display !== "none";
 const values = (select) => [...select.options].map((o) => o.value + (o.disabled ? "(x)" : ""));
-const valueOf = (select, text) => [...select.options].find((o) => o.textContent === text).value;
+// An option's label without its colour emoji (the swatch span has no text).
+const labelOf = (o) => [...o.childNodes]
+  .filter((n) => !(n.classList && n.classList.contains("fc-emoji")))
+  .map((n) => n.textContent).join("");
+const emojiOf = (o) => (o.querySelector(".fc-emoji") || { textContent: "" }).textContent;
+const valueOf = (select, text) => [...select.options].find((o) => labelOf(o) === text).value;
 const sent = () => Object.fromEntries(new w.FormData(form));
 const change = (el, value) => {
   el.value = value;
@@ -50,6 +55,17 @@ function check(what, ok, got) {
 
 // -- one part, the MMU printer profile ------------------------------------------------
 select("A");
+const asaOpt = [...filament.options].find((o) => labelOf(o) === "PM ASA");
+check("a coloured filament: emoji, then an exact swatch",
+  emojiOf(asaOpt) === "\u{1F7E7} "
+  && asaOpt.querySelector(".fc-swatch").style.background !== ""
+  && asaOpt.dataset.color === "#F2754E", asaOpt.outerHTML);
+const petCfOpt = [...filament.options].find((o) => labelOf(o) === "Sirayatech PET-CF");
+check("no colour: no icon", petCfOpt.children.length === 0, petCfOpt.outerHTML);
+const t3Opt = [...filament.options].find((o) => o.value === "t3");
+check("an empty gate: no icon", t3Opt.children.length === 0, t3Opt.outerHTML);
+check("the submit button is the one toggled, not a select's own",
+  form.querySelector('button[type="submit"]').disabled === false, "disabled");
 check("MMU profile: tools listed, T0 preselected",
   filament.value === "t0" && values(filament).includes("t3(x)"), values(filament));
 check("a tool picked: no Load into", !shown(slotLabel) && slot.disabled, shown(slotLabel));
@@ -62,9 +78,12 @@ check("a profile picked: Load into shown", shown(slotLabel) && !slot.disabled, s
 check("a profile already loaded: its tool preselected", slot.value === "t0", slot.value);
 change(filament, petCf);
 check("a profile loaded nowhere: the empty gate preselected", slot.value === "t3", slot.value);
-check("Load into labels", [...slot.options].map((o) => o.textContent).join(" | ") ===
+check("Load into labels", [...slot.options].map(labelOf).join(" | ") ===
   "T0, now Black (ASA) | T1, now PolyLite™ ASA Blue (PETG) | T2, now CR-PETG Transparent"
-  + " | T3, now empty", [...slot.options].map((o) => o.textContent));
+  + " | T3, now empty", [...slot.options].map(labelOf));
+check("Load into icons: the tool's filament colour, none for an empty gate",
+  [...slot.options].map(emojiOf).join("|") === "\u2B1B |\u2B1B |\u{1F7E6} |",
+  [...slot.options].map(emojiOf));
 change(slot, "t2");
 change(filament, creality);
 check("a tool the user chose is kept", slot.value === "t2", slot.value);
@@ -88,6 +107,11 @@ const extra = d.querySelector("#extras select[data-part=B]");
 const extraSlot = extra.parentElement.nextElementSibling;
 check("second part: tools and profiles",
   values(extra).includes("t2") && values(extra).includes(petCf), values(extra));
+const extraT2 = [...extra.options].find((o) => o.value === "t2");
+check("second part: one icon, the same label",
+  extraT2.querySelectorAll(".fc-emoji").length === 1
+  && labelOf(extraT2) === "T2: CR-PETG Transparent → Creality PETG"
+  && extraT2.dataset.color === "#00FFFF", extraT2.outerHTML);
 change(extra, petCf);
 check("second part, a profile: its own Load into", shown(extraSlot), shown(extraSlot));
 change(extraSlot.querySelector("select"), "t1");
