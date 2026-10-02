@@ -453,6 +453,11 @@ def test_validation_failure_rerenders_without_writing(logged: Admin) -> None:
                        "tls_key": ""})  # fmt: skip
     assert r.status_code == 400 and "Only identity = &quot;lan&quot;" in r.text
     assert logged.path.read_bytes() == before
+    r = logged.submit("/admin/server", "/admin/server",
+                      {"bind": "127.0.0.1", "port": "8765", "hosts": "localhost:8765",
+                       "identity": "none", "redirect_port": "8080"})  # fmt: skip
+    assert r.status_code == 400 and "redirect_port needs identity" in r.text
+    assert logged.path.read_bytes() == before
 
 
 def test_unknown_form_fields_are_refused(logged: Admin) -> None:

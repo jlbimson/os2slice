@@ -137,6 +137,7 @@ class ServerConfig:
     allowed_users: tuple[str, ...] = ()  # Tailscale logins, when identity = "tailscale"
     tls_cert: Path | None = None  # PEM chain; required for "lan"
     tls_key: Path | None = None
+    redirect_port: int = 0  # plain-HTTP listener that only 303s to https://hosts[0]/admin; 0 = off
 
 
 @dataclass(frozen=True)
@@ -219,8 +220,9 @@ def parse(data: dict[str, Any], path: Path) -> Config:
     check_keys(
         "server",
         server,
-        {"port", "bind", "hosts", "identity", "allowed_users", "tls_cert", "tls_key"},
-    )
+        {"port", "bind", "hosts", "identity", "allowed_users", "tls_cert", "tls_key",
+         "redirect_port"},
+    )  # fmt: skip
     port = server.get("port", 8765)
     if not isinstance(port, int) or isinstance(port, bool) or not 1024 <= port <= 65535:
         raise fail("server.port must be an integer from 1024 to 65535")
@@ -256,9 +258,21 @@ def parse(data: dict[str, Any], path: Path) -> Config:
             raise fail('identity = "lan" needs server.tls_cert and server.tls_key (HTTPS)')
         if "hosts" not in server:
             raise fail('identity = "lan" needs server.hosts, e.g. ["<name>.duckdns.org:8443"]')
+    redirect_port = server.get("redirect_port", 0)
+    if (
+        not isinstance(redirect_port, int)
+        or isinstance(redirect_port, bool)
+        or not 0 <= redirect_port <= 65535
+    ):
+        raise fail("server.redirect_port must be an integer from 1 to 65535, or 0 for off")
+    if redirect_port and redirect_port == port:
+        raise fail("server.redirect_port must differ from server.port (or be 0 for off)")
+    if redirect_port and identity != "lan":
+        raise fail('server.redirect_port needs identity = "lan" (or set it to 0 for off)')
     server_cfg = ServerConfig(
-        bind, port, tuple(map(str, hosts)), identity, tuple(users), tls_cert, tls_key
-    )
+        bind, port, tuple(map(str, hosts)), identity, tuple(users), tls_cert, tls_key,
+        redirect_port,
+    )  # fmt: skip
 
     export = table("export")
     check_keys("export", export, {"dir", "format", "units", "keep_days"})

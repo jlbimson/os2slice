@@ -5,6 +5,8 @@ base_url = "https://cad.onshape.com"   # must be https://*.onshape.com
 
 [server]
 port = 8765            # the Onshape extension Action URLs must use the same port
+# redirect_port = 8080  # identity = "lan" only: plain HTTP that just redirects to
+                        # https://<first of hosts>/admin (Home Assistant's Open Web UI)
 
 [export]
 dir = "~/OnshapeExports"
