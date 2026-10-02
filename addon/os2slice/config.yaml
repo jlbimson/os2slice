@@ -3,18 +3,23 @@ name: os2slice
 version: "0.3.1"
 slug: os2slice
 url: https://github.com/jlbimson/os2slice
-# `webui` (the info page's Open Web UI button -> /admin) is added by scripts/deploy_addon.sh
-# from the installed add-on's first `hosts` entry.
 description: Print Onshape parts through BamBuddy, with orientation and settings, and a config page at /admin (LAN only)
 arch:
   - amd64
 startup: application
 boot: auto
-# Own network namespace, not the host's (D-12): only the HTTPS port is published.
+# Own network namespace, not the host's (D-12): only the HTTPS port and the redirect port are published.
 ports:
   8443/tcp: 8443
+  8080/tcp: 8444
 ports_description:
   8443/tcp: os2slice HTTPS (Onshape extensions point here)
+  8080/tcp: plain HTTP that only redirects to the config page (the Open Web UI button)
+# Open Web UI: the Supervisor requires [HOST]/[PORT] here, and [HOST] is whatever name the
+# browser uses for Home Assistant, which the HTTPS service refuses (Host check, certificate).
+# So the button hits the plain-HTTP listener, which answers with a redirect to
+# https://<first of hosts>/admin.
+webui: "http://[HOST]:[PORT:8080]/admin"
 map:
   - type: ssl
     read_only: true
