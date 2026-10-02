@@ -222,25 +222,25 @@ def test_plan_and_print_on_a_pool(cfg: config.Config, onshape: OnshapeClient) ->
     assert "ams_mapping" not in item and "use_ams" not in item
 
 
-def test_plan_takes_the_wait_choice_or_the_targets_default(
+def test_plan_takes_the_wait_choice_and_defaults_to_start(
     cfg: config.Config,
     onshape: OnshapeClient,  # noqa: F811
 ) -> None:
-    def plan(c: config.Config, wait: bool | None) -> printing.PrintPlan:
+    def plan(c: config.Config, **wait: bool) -> printing.PrintPlan:
         m = mods(c, FakeBambuddy())
         z = Orientation.parse("z+")
-        return printing.plan_print(
-            req(), c, onshape, m, None, z, PrintSettings(), manual_start=wait
-        )
+        return printing.plan_print(req(), c, onshape, m, None, z, PrintSettings(), **wait)
 
-    assert not plan(cfg, None).manual_start  # BamBuddy's default: start by itself
-    assert plan(cfg, True).manual_start and not plan(cfg, False).manual_start
+    assert not plan(cfg).manual_start  # default: start by itself
+    assert plan(cfg, manual_start=True).manual_start
+    assert not plan(cfg, manual_start=False).manual_start
+    # A target still configured `manual_start = true` (deprecated) loads and is ignored.
     cfg2 = waiting(cfg)
-    assert plan(cfg2, None).manual_start and not plan(cfg2, False).manual_start
+    assert not plan(cfg2).manual_start and plan(cfg2, manual_start=True).manual_start
 
 
 def waiting(cfg: config.Config) -> config.Config:
-    """`cfg` with its BamBuddy target set to `manual_start = true`."""
+    """`cfg` with its BamBuddy target set to `manual_start = true` (deprecated)."""
     t = cfg.targets["bambuddy"]
     t = dataclasses.replace(t, values={**t.values, "manual_start": True})
     return dataclasses.replace(cfg, targets={**cfg.targets, "bambuddy": t})
@@ -271,13 +271,18 @@ def test_wait_checkbox_unchecked_by_default(running: Running) -> None:
     assert "checked" not in _checkbox(r.text)
 
 
-def test_wait_checkbox_checked_when_the_target_waits(cfg: config.Config) -> None:
-    run = Running(waiting(cfg), FakeBambuddy())
+def test_wait_checkbox_unchecked_even_when_the_target_says_wait(cfg: config.Config) -> None:
+    """`manual_start = true` on a target is deprecated and no longer ticks the box."""
+    run = Running(waiting(cfg), FakeBambuddy(job_states=["completed"]))
     try:
-        r, _ = run.get_form()
-        assert _checkbox(r.text).endswith(" checked>")
-        r, _ = panel_form(run)
-        assert _checkbox(r.text).endswith(" checked>")
+        r, form = run.get_form()
+        assert "checked" not in _checkbox(r.text)
+        r2, _ = panel_form(run)
+        assert "checked" not in _checkbox(r2.text)
+        r = run.post({**form, **choices()})  # unticked: the print starts by itself
+        assert r.status_code == 303
+        wait_job(run, r.headers["Location"])
+        assert run.fake.queued[0]["manual_start"] is False
     finally:
         run.httpd.shutdown()
 
@@ -298,15 +303,25 @@ def test_wait_choice_refusal_keeps_the_token(running: Running) -> None:
 def test_cli_wait_for_start_flag() -> None:
     p = cli.build_parser()
     base = ["print", "--url", URL]
-    assert p.parse_args(base).wait_for_start is None  # the target's default (off)
+    assert p.parse_args(base).wait_for_start is False  # default: start by itself
     assert p.parse_args([*base, "--wait-for-start"]).wait_for_start is True
-    assert p.parse_args([*base, "--no-wait-for-start"]).wait_for_start is False
+    with pytest.raises(SystemExit):
+        p.parse_args([*base, "--no-wait-for-start"])  # gone with the config default
 
 
-@pytest.mark.parametrize(("flag", "waits"), [([], False), (["--wait-for-start"], True)])
+@pytest.mark.parametrize(
+    ("flag", "target_says_wait", "waits"),
+    [([], False, False), (["--wait-for-start"], False, True), ([], True, False)],
+)
 def test_cli_print_passes_the_choice(
-    cfg: config.Config, monkeypatch: pytest.MonkeyPatch, flag: list[str], waits: bool
+    cfg: config.Config,
+    monkeypatch: pytest.MonkeyPatch,
+    flag: list[str],
+    target_says_wait: bool,
+    waits: bool,
 ) -> None:
+    if target_says_wait:  # deprecated `manual_start = true`: the CLI still starts
+        cfg = waiting(cfg)
     fake = FakeBambuddy(job_states=["completed"])
     real = registry.Modules.from_config.__func__  # type: ignore[attr-defined]
     monkeypatch.setattr(

@@ -19,7 +19,7 @@ The options below set up one BamBuddy that slices and queues. Other slicers and 
 | `default_printer`, `presets` | BamBuddy printer name, and slicer presets per printer model |
 | `walls`, `infill`, `supports`, `build_plate_only`, `top_layers`, `bottom_layers`, `brim`, `copies` | Starting values shown on the print page |
 | `default_plate` | Build plate used unless a print or a preset's `bed_type` says otherwise. `High Temp Plate` is Bambu's name for smooth PEI |
-| `manual_start` | Whether the print page's **Wait for Start** checkbox starts checked. Off (default): prints start by themselves once the printer is free; on: they wait for Start in BamBuddy |
+| `manual_start` | Deprecated, has no effect (kept so existing settings still load). Prints start by themselves once the printer is free; whoever prints ticks **Wait for Start** on the page to make that print wait for Start in BamBuddy (the CLI has `--wait-for-start`) |
 | `admin_password` | Turns on the config page `/admin` (at least 12 characters); see below |
 | `reset_config` | Leave off. On: the next start writes `config.toml` again from these options, discarding edits made on `/admin`; turn it off again afterwards |
 

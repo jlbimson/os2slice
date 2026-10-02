@@ -69,7 +69,7 @@ profile_dir = "/orca-profiles"   # optional: GUI user profiles (machine/, proces
 kind = "bambuddy"                # role "both": slices too, as slicer "farm"
 url = "http://172.30.32.1:8000"
 folder = "Onshape"               # default "Onshape"
-manual_start = false             # default false: the Wait for Start checkbox starts unchecked
+manual_start = false             # deprecated, no effect (still accepted): Wait for Start is per print
 public_url = "https://print.example.duckdns.org:8000"
 # api key: secret store entry "targets.farm.api_key" (never in this file)
 
@@ -221,9 +221,9 @@ filled-in secret option replaces its page value at each start (D-32).
 3. On Print: export + orient as today → `SliceInput` → the printer's slicer →
    `SliceOutput` → the printer's target `submit(start=not wait)`, where `wait` is the
    person's **Wait for Start** checkbox (form field `manual_start`, absent or `on`; the
-   CLI's `--wait-for-start`). It starts checked when a target is configured
-   `manual_start = true` (BamBuddy's default is false; a target without the setting,
-   like Moonraker or PrusaLink, counts as waiting). The Print button's same-origin POST
+   CLI's `--wait-for-start`). It always starts unchecked, so prints start by themselves
+   unless the person ticks it (D-33); a target's `manual_start` setting is deprecated,
+   still accepted, and has no effect. The Print button's same-origin POST
    with its CSRF token, or the CLI's `[y/N]`, is the human confirmation (D-13). The job
    page shows the `Submission`.
 4. Multi-material (D-20) and copies (D-25): the core exports the parts and orients them

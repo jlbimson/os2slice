@@ -147,7 +147,7 @@ class BambuddyConfig:
     base_url: str
     folder: str
     default_printer: str
-    manual_start: bool
+    manual_start: bool  # deprecated, no effect (D-33); still accepted
     presets: dict[str, PresetChoice]  # keyed by BamBuddy printer model, e.g. "A1 Mini"
     public_url: str = ""  # BamBuddy's UI as browsers reach it (default: this host, port 8000)
 

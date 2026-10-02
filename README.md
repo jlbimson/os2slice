@@ -143,7 +143,7 @@ Design notes:
 ## Security
 
 - os2slice only **reads** from Onshape. On slicers and targets it only uploads its own files, slices and queues; it never deletes or edits anything else there. Modules call only the URLs in the config.
-- A print needs a button press on os2slice's own page (same-origin POST, single-use token), or a `[y/N]` in the CLI; the person printing chooses whether the job starts by itself once the printer is free or waits until someone presses Start (**Wait for Start**).
+- A print needs a button press on os2slice's own page (same-origin POST, single-use token), or a `[y/N]` in the CLI; the job starts by itself once the printer is free, unless the person printing ticks **Wait for Start** (CLI: `--wait-for-start`); then it waits until someone presses Start.
 - The config page `/admin` needs an admin password set on the server (scrypt hash; login rate-limited), and every change is a same-origin POST with a single-use token. Secrets are write-only there: pages show "set" or "not set", never the value, and they never go into `config.toml`.
 - Sign-in tokens and secrets stay on the server, in files only the service can read (or the system keyring on a desktop).
 - It serves HTTPS on the LAN only, and accepts requests only for the configured host names.

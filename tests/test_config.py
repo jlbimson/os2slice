@@ -131,6 +131,14 @@ def test_targets_and_printers_tables() -> None:
     assert set(cfg.slicers) == set() and cfg.slicer_modules == {}
 
 
+def test_deprecated_manual_start_true_still_loads() -> None:
+    """`manual_start` has no effect any more (D-33), but old configs keep loading."""
+    cfg = _parse({"targets": {"farm": {**FARM, "manual_start": True}}})
+    assert cfg.targets["farm"].values["manual_start"] is True
+    legacy = _parse({"bambuddy": {"base_url": "http://bb:8000", "manual_start": True}})
+    assert legacy.targets["bambuddy"].values["manual_start"] is True
+
+
 def test_a_slicer_module_and_a_desktop_slicer_side_by_side() -> None:
     cfg = _parse(
         {

@@ -316,7 +316,7 @@ def plan_print(
     extra_parts: list[tuple[str, str]] | None = None,
     process: str | None = None,
     machine: str | None = None,
-    manual_start: bool | None = None,
+    manual_start: bool = False,
 ) -> PrintPlan:
     """Gather everything for the confirmation. Reads from Onshape and the target only.
 
@@ -326,7 +326,7 @@ def plan_print(
     `extra_parts` makes it a multi-material print: more (part id, material id) pairs
     printed as one object. `process` and `machine` pick one of the user's own process and
     printer profiles in the printer's slicer instead of the configured ones.
-    `manual_start` is the person's Wait for Start choice; None = the target's default.
+    `manual_start` is the person's Wait for Start choice (default: start by itself).
     """
     if not modules.targets:
         raise ConfigError(
@@ -458,7 +458,7 @@ def plan_print(
         profiles=profiles,
         orientation=orientation,
         settings=settings,
-        manual_start=modules.waits(chosen) if manual_start is None else manual_start,
+        manual_start=manual_start,
         target_label=target.spec.label,
         material=first,
         bed_type=check_bed_type(bed_type)

@@ -118,6 +118,8 @@ def render_config(opts: dict[str, Any], ssl_dir: Path = SSL) -> str:
             else []
         ),
         f"default_printer = {s(opts.get('default_printer', ''))}",
+        # Deprecated, no effect (the person printing chooses Wait for Start). Still
+        # rendered so the output stays byte-identical for the same options.
         f"manual_start = {'true' if opts.get('manual_start', False) else 'false'}",
         "",
     ]

@@ -79,10 +79,11 @@ SPEC = ModuleSpec(
         ),
         Field(
             "manual_start",
-            "Wait for Start in BamBuddy",
+            "Wait for Start in BamBuddy (deprecated)",
             "bool",
             default=False,
-            help="default state of the panel's Wait for Start toggle (D-13)",
+            help="deprecated, has no effect: the person printing ticks Wait for Start on "
+            "the page (the CLI has --wait-for-start); prints start by themselves otherwise",
         ),
         Field(
             "public_url",
@@ -128,7 +129,6 @@ class BambuddyModule:
         self.key = key
         self.url = str(values["url"]).rstrip("/")
         self.folder = str(values.get("folder") or "Onshape")
-        self.manual_start = bool(values.get("manual_start", False))
         self.public_url = str(values.get("public_url") or "").rstrip("/")
         self.models: Mapping[str, ModelDefaults] = values.get("models") or {}
         self._api_key = str(api_key)
@@ -472,6 +472,7 @@ class BambuddyModule:
         progress: Progress = lambda s: None,
     ) -> Submission:
         """Queue the sliced file. `start=False` → manual_start: it waits for Start (D-13).
+        `start` is the only source; the `manual_start` config value is deprecated and unused.
 
         On a pool BamBuddy picks the printer: the item names the model, and each chosen
         material becomes a forced type+colour filament override; no tray ids and no AMS
