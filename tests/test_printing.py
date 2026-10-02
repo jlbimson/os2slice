@@ -54,7 +54,7 @@ def req(part: str | None = "JHD"):
     return parse_onshape_url(URL, "bambuddy", ["bambuddy"], part)
 
 
-def plan(cfg, onshape, fake, orientation="as-modeled", printer=None):
+def plan(cfg, onshape, fake, orientation="as-modeled", printer=None, wait=None):
     return printing.plan_print(
         req(),
         cfg,
@@ -63,6 +63,7 @@ def plan(cfg, onshape, fake, orientation="as-modeled", printer=None):
         printer,
         Orientation.parse(orientation),
         PrintSettings(3, 25, "tree"),
+        manual_start=wait,
     )
 
 
@@ -91,7 +92,8 @@ def test_plan_errors(cfg: Config, onshape: OnshapeClient) -> None:
 
 def test_execute_queues_with_manual_start(cfg: Config, onshape: OnshapeClient) -> None:
     fake = FakeBambuddy(job_states=["completed"])
-    p = plan(cfg, onshape, fake)
+    p = plan(cfg, onshape, fake, wait=True)
+    assert "waits in BamBuddy's queue until you press Start" in "\n".join(p.summary_lines())
     steps: list[str] = []
     out = printing.execute_print(
         p, cfg, onshape, mods(cfg, fake), queue=True, progress=steps.append
@@ -181,7 +183,7 @@ def test_ams_slot_sets_preset_colour_and_mapping(x1c_cfg: Config, onshape: Onsha
     }
     assert fake.slice_bodies[0]["filament_colours"] == ["#FFF144"]
     assert fake.queued[0] | {} == {
-        "library_file_id": 31, "printer_id": 2, "manual_start": True,
+        "library_file_id": 31, "printer_id": 2, "manual_start": False,
         "ams_mapping": [0], "use_ams": True,
     }  # fmt: skip
 
@@ -519,6 +521,6 @@ def test_print_through_another_slicer_and_the_bambuddy_target(
     assert fake.slice_bodies == []  # BamBuddy didn't slice...
     assert len(fake.uploads) == 1  # ...it took the stand-in's file into its library
     assert fake.queued == [
-        {"library_file_id": 30, "printer_id": 1, "manual_start": True, "use_ams": False}
+        {"library_file_id": 30, "printer_id": 1, "manual_start": False, "use_ams": False}
     ]
     assert steps[-2:] == ["Queueing on A1 Mini", "Uploading to BamBuddy"]

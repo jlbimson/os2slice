@@ -103,7 +103,7 @@ def test_confirmation_page(srv: Running) -> None:
 
 def test_full_print_flow(srv: Running) -> None:
     _, form = srv.get_form()
-    r = srv.post({**form, **choices()})
+    r = srv.post({**form, **choices(manual_start="on")})  # Wait for Start checked
     assert r.status_code == 303
     done = wait_job(srv, r.headers["Location"])
     assert "Queued ✓" in done.text, done.text
@@ -320,7 +320,8 @@ def test_panel_face_only_prints_the_faces_part(srv: Running) -> None:
     assert "Queued ✓" in page.text and "face JHO down" in page.text
     assert "frame-ancestors https://cad.onshape.com" in page.headers["Content-Security-Policy"]
     assert 'href="/panel?' in page.text  # "Print another"
-    assert srv.fake.queued == [{"library_file_id": 31, "printer_id": 1, "manual_start": True}]
+    # Wait for Start unchecked (not sent): the print starts by itself.
+    assert srv.fake.queued == [{"library_file_id": 31, "printer_id": 1, "manual_start": False}]
     assert srv.fake.slice_bodies[0]["auto_orient"] is False
 
 
@@ -464,7 +465,8 @@ def test_panel_has_separate_printer_and_filament_menus(srv: Running) -> None:
     assert '<option value="">Preset filament (Bambu PLA Basic)</option>' in menu.group(2)
     # ...and every printer's choices for panel.js to switch to.
     choices_json = json.loads(menu.group(1).replace("&quot;", '"').replace("&#x27;", "'"))
-    assert set(choices_json) == {"bambuddy/1"}  # the only printer with presets here
+    # The only printer with presets here, and its model's pool.
+    assert set(choices_json) == {"bambuddy/1", "bambuddy/any:A1 Mini"}
     assert [c["value"] for c in choices_json["bambuddy/1"]] == ["", "254"]
     assert [c["default"] for c in choices_json["bambuddy/1"]] == [False, True]
 

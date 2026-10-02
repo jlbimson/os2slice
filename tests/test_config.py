@@ -120,7 +120,7 @@ def test_targets_and_printers_tables() -> None:
     farm = cfg.targets["farm"]
     assert (farm.kind, farm.values) == (
         "bambuddy",
-        {"url": "http://bb:8000", "folder": "Parts", "manual_start": True},
+        {"url": "http://bb:8000", "folder": "Parts", "manual_start": False},
     )
     a1 = farm.models["A1 Mini"]
     assert a1.slicer == "" and a1.profiles.filament == "Bambu PLA Basic @BBL A1M"

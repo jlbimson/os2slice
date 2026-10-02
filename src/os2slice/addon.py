@@ -117,7 +117,7 @@ def render_config(opts: dict[str, Any], ssl_dir: Path = SSL) -> str:
             else []
         ),
         f"default_printer = {s(opts.get('default_printer', ''))}",
-        f"manual_start = {'true' if opts.get('manual_start', True) else 'false'}",
+        f"manual_start = {'true' if opts.get('manual_start', False) else 'false'}",
         "",
     ]
     for preset in opts.get("presets") or []:

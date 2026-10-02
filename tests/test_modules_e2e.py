@@ -120,7 +120,7 @@ def test_studio_sidecar_slices_and_bambuddy_queues_two_copies(
     ) as modules:
         plan, out = run(cfg, onshape, modules, "A1 Mini", PrintSettings(3, 25, copies=2))
     assert plan.printer.key == "farm/1" and plan.printer.slicer == "studio"
-    assert plan.manual_start and plan.target_label == "BamBuddy"
+    assert not plan.manual_start and plan.target_label == "BamBuddy"  # starts by default
     # Sliced by the sidecar, as a project with one build item per copy.
     assert studio.fields()["exportType"] == "3mf"
     (model,) = studio.files(name="file")
@@ -135,8 +135,8 @@ def test_studio_sidecar_slices_and_bambuddy_queues_two_copies(
     assert re.search(r'filename="[^"]+\.gcode\.3mf"', head)
     assert out.slice.data in upload
     assert [f["name"] for f in bb.folders] == ["Onshape"]
-    assert bb.queued == [{"library_file_id": 30, "printer_id": 1, "manual_start": True}]
-    assert out.submission is not None and out.submission.state == "waiting"
+    assert bb.queued == [{"library_file_id": 30, "printer_id": 1, "manual_start": False}]
+    assert out.submission is not None and out.submission.state == "started"
 
 
 # -- (b) OrcaSlicer sidecar → Moonraker -------------------------------------------------

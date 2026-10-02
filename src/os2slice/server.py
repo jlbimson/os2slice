@@ -92,6 +92,7 @@ FORM_FIELDS = frozenset(
         "face",
         "plate",
         "extra",
+        "manual_start",  # the Wait for Start checkbox: absent = start by itself, "on" = wait
         *(f"x_{key}" for key in extra_settings.BY_KEY),  # extra settings (empty = profile's)
     }
 )
@@ -294,9 +295,8 @@ class Service:
             raise ConfigError("No printers are configured on the server", "Add a [targets.*] table")
 
     def start_note(self) -> str:
-        """Where queued prints wait: the targets that leave them for a person (D-13)."""
-        mods = self.modules
-        return " or ".join(t.spec.label for k, t in mods.targets.items() if mods.manual_start[k])
+        """Where queued prints wait for Start: every target's name (D-13)."""
+        return " or ".join(dict.fromkeys(t.spec.label for t in self.modules.targets.values()))
 
 
 def make_handler(service: Service) -> type[BaseHTTPRequestHandler]:
@@ -617,6 +617,7 @@ class _Handler(BaseHTTPRequestHandler):
         fields = {k: form[k] for k in REQUEST_FIELDS if k in form and form[k] != ""}
         settings = _form_settings(form, self.svc.cfg)
         plate = check_bed_type(form.get("plate"))
+        wait = _wait_for_start(form)
         # Redeem last, so a typo in a setting doesn't burn the form. The panel's token
         # is bound to the Part Studio (the part comes from the live selection).
         bound = _bind_element(req) if panel else _bind(req)
@@ -634,7 +635,7 @@ class _Handler(BaseHTTPRequestHandler):
                     job_req = replace(req, part_id=onshape.part_of_face(req, face))
                 plan = printing.plan_print(
                     job_req, cfg, onshape, mods, printer, orientation, settings, material, plate,
-                    extra, process or None, machine or None,
+                    extra, process or None, machine or None, wait,
                 )  # fmt: skip
                 progress("Checked the part and the printer")
                 out = printing.execute_print(
@@ -1042,12 +1043,6 @@ def _print_form(
         if req.configuration
         else ""
     )
-    waits_in = svc.start_note()
-    start = (
-        f"waits in {waits_in}'s queue until you press Start"
-        if waits_in
-        else "starts as soon as the printer is free"
-    )
     return f"""
 <dl><dt>Part</dt><dd>{_e(part)}</dd><dt>Document</dt><dd>{_e(doc)}</dd>{config}</dl>
 <form method="post" action="/print">{hidden}
@@ -1055,9 +1050,28 @@ def _print_form(
 {_plate_select(cfg)}
 <label>Orientation <select name="orient">{_options(ORIENT_CHOICES, "as-modeled")}</select></label>
 {_settings_fields(cfg)}
-<p class="muted">The print {_e(start)}.</p>
+{_wait_field(svc)}
 <button type="submit">Slice and queue print</button>
 </form>"""
+
+
+def _wait_field(svc: Service) -> str:
+    """The Wait for Start checkbox (D-13: the person printing chooses). Checked when a
+    target is configured `manual_start = true` (Modules.waits_by_default)."""
+    on = " checked" if svc.modules.waits_by_default() else ""
+    where = svc.start_note() or "the queue"
+    return (
+        f'<label class="check"><input type="checkbox" name="manual_start" value="on"{on}>'
+        f" Wait for Start in {_e(where)} (don't start by itself)</label>"
+    )
+
+
+def _wait_for_start(form: dict[str, str]) -> bool:
+    """The Wait for Start checkbox: unchecked isn't sent at all."""
+    value = form.get("manual_start")
+    if value not in (None, "on"):
+        raise BadRequest("Invalid Wait for Start choice")
+    return value == "on"
 
 
 def _plate_select(cfg: Config) -> str:
@@ -1447,8 +1461,6 @@ def _panel_body(
         )
     )
     orient = _options([("face", "Selected face down"), *ORIENT_CHOICES], "as-modeled")
-    waits_in = svc.start_note()
-    start = f"Waits in {waits_in} until you press Start." if waits_in else ""
     beds = {v.printer.key: v.printer.bed_mm or DEFAULT_BED for v in views}
     # The preview lays copies out like bambu_project.copy_offsets, with the same spacing.
     layout = {
@@ -1476,7 +1488,7 @@ def _panel_body(
 <label>Orientation <select name="orient">{orient}</select></label>
 {_settings_fields(cfg)}
 {_extra_fields(cfg)}
-<p class="muted">{_e(start)}</p>
+{_wait_field(svc)}
 <button type="submit" disabled>Slice and queue print</button>
 </form></div>
 <script src="/static/panel.js?v={static_version()}"></script>

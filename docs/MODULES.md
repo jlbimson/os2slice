@@ -69,7 +69,7 @@ profile_dir = "/orca-profiles"   # optional: GUI user profiles (machine/, proces
 kind = "bambuddy"                # role "both": slices too, as slicer "farm"
 url = "http://172.30.32.1:8000"
 folder = "Onshape"               # default "Onshape"
-manual_start = true              # default true; false = submit(start=True)
+manual_start = false             # default false: the Wait for Start checkbox starts unchecked
 public_url = "https://print.example.duckdns.org:8000"
 # api key: secret store entry "targets.farm.api_key" (never in this file)
 
@@ -103,6 +103,20 @@ slicer = "orca-api"              # any of: slicer, profiles (per field), bed_mm,
   `extra`. Keys may contain spaces (BamBuddy names like `"A1 Mini"`), not `/` or `|`.
 - Discovered printers get the key `<target>/<id>` (BamBuddy: `farm/3`). The web forms
   send that key; the CLI and `default_printer` accept a key or a name.
+- BamBuddy printer pools: after its printers, a BamBuddy target lists one
+  `<target>/any:<model>` named `Any <model>` (`PrinterInfo.pool = True`) for each model
+  that has `[targets.<key>.models."<model>"]` defaults and at least one printer. It has
+  the model's slicer, profiles, bed and nozzle count, and `extra.target_model`; it is
+  active when any printer of the model is. Its status is ready when any of them is, and
+  its materials are the distinct loaded (type, colour) pairs across them, with ids
+  `<TYPE>.<RRGGBB>` (no tray ids). Submitting queues with `target_model` and
+  `filament_overrides` (`force_color_match` per chosen filament, `slot_id` = filament
+  n) and no `printer_id` or `ams_mapping`: BamBuddy's scheduler dispatches it to the
+  first idle printer of that model with every filament loaded and maps its trays
+  itself. On dual-nozzle models (H2D) the pool's materials have no nozzle: the project
+  gets no Manual filament map (the slicer chooses), and the check that each filament
+  prints on the nozzle its slot feeds is skipped. A `[printers."Any <model>"]` entry
+  overrides a pool like any discovered printer.
 - Module field values are validated against the kind's `ModuleSpec.fields` (type,
   required, default); unknown keys and secrets in the file are refused.
 
@@ -188,11 +202,16 @@ filled-in secret option replaces its page value at each start (D-32).
    menu. A target that can't tell returns none, and the menu falls back to the printer's
    configured `materials` (`PrinterInfo.materials`). Menu values are `Material.id`
    (`[A-Za-z0-9_.-]{1,40}`); the right-click page's single menu sends `<key>|<id>`. A
-   material is usable once it has a `profile` and, on a dual-nozzle printer, an `extruder`.
+   material is usable once it has a `profile` and, on a dual-nozzle printer that isn't a
+   pool, an `extruder`.
 3. On Print: export + orient as today → `SliceInput` → the printer's slicer →
-   `SliceOutput` → the printer's target `submit(start=False)` unless the target is
-   configured to start (BamBuddy `manual_start = false`). The job page shows the
-   `Submission`.
+   `SliceOutput` → the printer's target `submit(start=not wait)`, where `wait` is the
+   person's **Wait for Start** checkbox (form field `manual_start`, absent or `on`; the
+   CLI's `--wait-for-start`). It starts checked when a target is configured
+   `manual_start = true` (BamBuddy's default is false; a target without the setting,
+   like Moonraker or PrusaLink, counts as waiting). The Print button's same-origin POST
+   with its CSRF token, or the CLI's `[y/N]`, is the human confirmation (D-13). The job
+   page shows the `Submission`.
 4. Multi-material (D-20) and copies (D-25): the core exports the parts and orients them
    with one rotation and one drop (`orient_parts`); each `PartGeometry` carries its
    material. Filament n is the n-th distinct material (`base.distinct_materials`), and

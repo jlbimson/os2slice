@@ -167,7 +167,9 @@ class Modules:
     targets: dict[str, Any] = field(default_factory=dict)
     configured: dict[str, PrinterConfig] = field(default_factory=dict)
     default_printer: str = ""
-    manual_start: dict[str, bool] = field(default_factory=dict)  # by target key
+    # By target key: the default of the Wait for Start toggle (`manual_start`; a target
+    # without that setting, like Moonraker, defaults to waiting).
+    manual_start: dict[str, bool] = field(default_factory=dict)
 
     @classmethod
     def from_config(
@@ -277,9 +279,15 @@ class Modules:
             log.warning("%s: own profiles unreadable: %s", printer.slicer, e.one_line())
             return ProfileCatalog()
 
-    def starts(self, printer: PrinterInfo) -> bool:
-        """Whether a submitted print may start by itself (manual_start = false)."""
-        return not self.manual_start.get(printer.target, True)
+    def waits(self, printer: PrinterInfo) -> bool:
+        """The default of the Wait for Start toggle for this printer: its target's
+        `manual_start` (the person printing chooses per print, D-13)."""
+        return self.manual_start.get(printer.target, True)
+
+    def waits_by_default(self) -> bool:
+        """The page's and panel's Wait for Start default: on when any target is set to
+        wait, so a mixed setup errs on the side of waiting."""
+        return any(self.manual_start.values())
 
     def ui_links(self, request_host: str = "") -> list[tuple[str, str]]:
         """(label, url) of each target's own UI that has one, for the panel and job pages."""
